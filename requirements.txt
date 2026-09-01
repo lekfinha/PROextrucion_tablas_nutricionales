@@ -1,0 +1,12 @@
+# Base de Datos y ORM
+SQLAlchemy>=2.0.0
+
+# Manipulación de Datos y Lectura de Excel
+pandas>=2.0.0
+openpyxl>=3.1.0
+
+# Motor de Optimización Matemática (Fase Futura)
+scipy>=1.11.0
+
+# Interfaz Gráfica Web (Fase Futura)
+streamlit>=1.30.0

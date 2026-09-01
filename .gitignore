@@ -1,0 +1,46 @@
+# ── Base de datos local ────────────────────────────────────────────────────────
+data/*.db
+data/*.db-shm
+data/*.db-wal
+
+# Mantener la carpeta data/ pero ignorar su contenido pesado/local
+# (archivos Excel de referencia también se ignoran por ser binarios grandes)
+data/*.xlsx
+data/*.xls
+data/.~lock.*
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+
+# Entornos virtuales
+.venv/
+venv/
+env/
+ENV/
+
+# Distribución / empaquetado
+dist/
+build/
+*.egg-info/
+*.egg
+
+# ── IDEs y editores ───────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── Sistema operativo ─────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Miscelánea ────────────────────────────────────────────────────────────────
+*.log
+.env
+.env.*
