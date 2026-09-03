@@ -7,10 +7,12 @@ from src.models.subproducto import (                     # noqa: F401
     SubProducto,
     SubProductoIngrediente,
     SubProductoComponente,
+    CostoOperativo,
 )
 from src.models.producto_final import (                  # noqa: F401
     ProductoFinal,
     ProductoFinalSubProducto,
+    CostoOperativoPT,
 )
 from src.ui.app import AppNutricion
 
