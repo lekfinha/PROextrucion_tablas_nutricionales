@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.database import Base
@@ -202,6 +202,7 @@ class SubProducto(Base):
                                     autoincrement=True)
     nombre: Mapped[str] = mapped_column(String, nullable=False, unique=True)
     descripcion: Mapped[str | None] = mapped_column(Text, default="")
+    critico: Mapped[bool] = mapped_column(Boolean, default=False)
 
     # Humedad final del subproducto como fracción (0.0–1.0).
     # Ejemplo: extruido sale con 3% de humedad → humedad_final = 0.03

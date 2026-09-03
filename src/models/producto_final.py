@@ -11,7 +11,7 @@ formato de tabla formateado listo para Streamlit/Excel.
 
 from __future__ import annotations
 
-from sqlalchemy import Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.database import Base
@@ -102,6 +102,7 @@ class ProductoFinal(Base):
                                     autoincrement=True)
     nombre: Mapped[str] = mapped_column(String, nullable=False, unique=True)
     descripcion: Mapped[str | None] = mapped_column(Text, default="")
+    critico: Mapped[bool] = mapped_column(Boolean, default=False)
 
     # Gramaje para etiquetado
     porcion_g: Mapped[float] = mapped_column(Float, default=25.0)

@@ -1,4 +1,4 @@
-from sqlalchemy import String, Float, UniqueConstraint
+from sqlalchemy import String, Float, Boolean, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 from src.database import Base
 
@@ -9,6 +9,7 @@ class Ingrediente(Base):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     nombre: Mapped[str] = mapped_column(String)
     fabricante: Mapped[str] = mapped_column(String)
+    critico: Mapped[bool] = mapped_column(Boolean, default=False)
     costo_kg: Mapped[float] = mapped_column(Float, default=0.0)
     
     # Calorías y Proteínas
