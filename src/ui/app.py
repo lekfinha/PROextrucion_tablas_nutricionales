@@ -138,7 +138,11 @@ class AppNutricion(tk.Tk):
             filtradas = [o for o in opciones if texto in o.lower()] if texto else opciones
             combo['values'] = filtradas
             if filtradas:
-                combo.event_generate('<Down>')
+                # Abrir el dropdown SIN mover el foco del entry
+                try:
+                    combo.tk.eval(f"ttk::combobox::Post {combo}")
+                except Exception:
+                    pass  # si falla (Tcl antiguo), simplemente no abre
 
         combo.bind('<KeyRelease>', _filter)
         combo.bind('<<ComboboxSelected>>', callback)
