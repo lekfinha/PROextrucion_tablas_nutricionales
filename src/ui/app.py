@@ -1,14 +1,19 @@
+"""
+Interfaz gráfica principal — Gestor Nutricional Pro Extrusion.
+
+Usa el modelo unificado Producto (reemplaza SubProducto + ProductoFinal).
+"""
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy.exc import IntegrityError
 from src.database import engine
 from src.models.ingrediente import Ingrediente
-from src.models.subproducto import (SubProducto, SubProductoIngrediente,
-                                     CostoOperativo, NUTRIENTES)
-from src.models.producto_final import (ProductoFinal, ProductoFinalSubProducto,
-                                        CostoOperativoPT, ETIQUETAS_NUTRIENTES)
+from src.models.producto import (Producto, RecetaIngrediente, RecetaProducto,
+                                  CostoOperativo, NUTRIENTES, ETIQUETAS_NUTRIENTES)
+from src.models.micronutriente import Micronutriente, ProductoMicronutriente
 from src.normativas import calcular_sellos, listar_normativas, NORMATIVAS_DISPONIBLES
+from src.utils.redondeo import redondear_minsal
 
 # ── Paleta y fuentes ───────────────────────────────────────────────────────────
 COLOR_BG     = "#F5F5F5"
@@ -16,6 +21,7 @@ COLOR_ACENTO = "#2C7BE5"
 COLOR_PELIGRO= "#E53935"
 COLOR_EXITO  = "#43A047"
 COLOR_TEXTO  = "#212121"
+COLOR_WARN   = "#FF8F00"
 FONT_TITULO  = ("Segoe UI", 15, "bold")
 FONT_NORMAL  = ("Segoe UI", 10)
 FONT_PEQUEÑA = ("Segoe UI", 9)
@@ -28,7 +34,7 @@ class AppNutricion(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Gestor Nutricional — Pro Extrusion")
-        self.geometry("720x780")
+        self.geometry("760x800")
         self.minsize(560, 640)
         self.config(bg=COLOR_BG)
         self.resizable(True, True)
@@ -45,7 +51,7 @@ class AppNutricion(tk.Tk):
             "grasa_monoinsaturada_g": ("  └ Grasa Monoinsat. (g)",       float),
             "grasa_poliinsaturada_g": ("  └ Grasa Poliinsat. (g)",       float),
             "acidos_grasos_trans_g":  ("  └ Ácidos Grasos Trans (g)",    float),
-            "colesterol_mg":          ("Colesterol (mg)",                float),
+            "colesterol_mg":          ("  └ Colesterol (mg)",            float),
             "carbohidratos_disp_g":   ("H. de Carbono Disp. (g)",        float),
             "azucares_totales_g":     ("  └ Azúcares Totales (g)",       float),
             "sorbitol_g":             ("  └ Sorbitol (g)",               float),
@@ -59,9 +65,8 @@ class AppNutricion(tk.Tk):
         self._campos_en_fraccion = {"humedad_porcentaje"}
 
         self.entries: dict[str, tk.Entry] = {}
-        self.mapa_ingredientes:      dict[str, int] = {}
-        self.mapa_subproductos:      dict[str, int] = {}
-        self.mapa_productos_finales: dict[str, int] = {}
+        self.mapa_ingredientes: dict[str, int] = {}
+        self.mapa_productos:    dict[str, int] = {}
         self.ingrediente_actual_id: int | None = None
         self._critico_var = tk.BooleanVar(value=False)
 
@@ -79,34 +84,31 @@ class AppNutricion(tk.Tk):
         self.entries.clear()
         self.ingrediente_actual_id = None
 
-    def _titulo(self, parent: tk.Widget, texto: str) -> tk.Label:
+    def _titulo(self, parent, texto):
         lbl = tk.Label(parent, text=texto, font=FONT_TITULO, bg=COLOR_BG, fg=COLOR_TEXTO)
         lbl.pack(pady=(16, 8))
         return lbl
 
-    def _boton(self, parent: tk.Widget, texto: str, comando,
-               color_bg: str = "#E0E0E0", color_fg: str = COLOR_TEXTO,
-               ancho: int = 28) -> tk.Button:
+    def _boton(self, parent, texto, comando,
+               color_bg="#E0E0E0", color_fg=COLOR_TEXTO, ancho=28):
         return tk.Button(parent, text=texto, command=comando,
                          bg=color_bg, fg=color_fg, font=FONT_NORMAL,
                          width=ancho, relief="flat", cursor="hand2",
                          activebackground=color_bg, activeforeground=color_fg,
                          pady=6)
 
-    def _separador(self, parent: tk.Widget):
+    def _separador(self, parent):
         tk.Frame(parent, bg="#BDBDBD", height=1).pack(fill="x", padx=20, pady=6)
 
-    def _crear_scroll_frame(self, parent: tk.Widget):
+    def _crear_scroll_frame(self, parent):
         outer = tk.Frame(parent, bg=COLOR_BG)
         canvas = tk.Canvas(outer, bg=COLOR_BG, highlightthickness=0)
         sb = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
         canvas.configure(yscrollcommand=sb.set)
         sb.pack(side="right", fill="y")
         canvas.pack(side="left", fill="both", expand=True)
-
         inner = tk.Frame(canvas, bg=COLOR_BG)
         win_id = canvas.create_window((0, 0), window=inner, anchor="nw")
-
         inner.bind("<Configure>",
                    lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.bind("<Configure>",
@@ -125,8 +127,7 @@ class AppNutricion(tk.Tk):
                     color_bg=COLOR_EXITO, color_fg="white", ancho=22).pack(side="right")
         return frame
 
-    def _combobox_buscable(self, parent: tk.Widget, opciones: list[str],
-                           callback) -> ttk.Combobox:
+    def _combobox_buscable(self, parent, opciones, callback):
         var = tk.StringVar()
         combo = ttk.Combobox(parent, textvariable=var, width=45, font=FONT_NORMAL)
         combo['values'] = opciones
@@ -138,11 +139,10 @@ class AppNutricion(tk.Tk):
             filtradas = [o for o in opciones if texto in o.lower()] if texto else opciones
             combo['values'] = filtradas
             if filtradas:
-                # Abrir el dropdown SIN mover el foco del entry
                 try:
                     combo.tk.eval(f"ttk::combobox::Post {combo}")
                 except Exception:
-                    pass  # si falla (Tcl antiguo), simplemente no abre
+                    pass
 
         combo.bind('<KeyRelease>', _filter)
         combo.bind('<<ComboboxSelected>>', callback)
@@ -157,47 +157,79 @@ class AppNutricion(tk.Tk):
         self._recargar_mapa_ingredientes()
         return self._combobox_buscable(parent, sorted(self.mapa_ingredientes), callback)
 
-    def _recargar_mapa_subproductos(self):
+    def _recargar_mapa_productos(self, tipo_filtro=None):
         with Session(engine) as s:
-            sps = s.query(SubProducto).order_by(SubProducto.nombre).all()
-            self.mapa_subproductos = {sp.nombre: sp.id for sp in sps}
+            q = s.query(Producto).order_by(Producto.nombre)
+            if tipo_filtro:
+                q = q.filter(Producto.tipo == tipo_filtro)
+            prods = q.all()
+            self.mapa_productos = {p.nombre: p.id for p in prods}
 
-    def _crear_combobox_sp(self, parent, callback):
-        self._recargar_mapa_subproductos()
-        return self._combobox_buscable(parent, sorted(self.mapa_subproductos), callback)
+    def _crear_combobox_producto(self, parent, callback, tipo_filtro=None):
+        self._recargar_mapa_productos(tipo_filtro)
+        return self._combobox_buscable(parent, sorted(self.mapa_productos), callback)
 
-    def _recargar_mapa_pf(self):
-        with Session(engine) as s:
-            pfs = s.query(ProductoFinal).order_by(ProductoFinal.nombre).all()
-            self.mapa_productos_finales = {pf.nombre: pf.id for pf in pfs}
-
-    def _crear_combobox_pf(self, parent, callback):
-        self._recargar_mapa_pf()
-        return self._combobox_buscable(parent, sorted(self.mapa_productos_finales), callback)
+    def _selectinload_completo(self):
+        """Carga eager completa para calcular tabla nutricional recursiva."""
+        return [
+            selectinload(Producto.receta_ingredientes)
+                .selectinload(RecetaIngrediente.ingrediente),
+            selectinload(Producto.receta_productos)
+                .selectinload(RecetaProducto.hijo)
+                .selectinload(Producto.receta_ingredientes)
+                .selectinload(RecetaIngrediente.ingrediente),
+            selectinload(Producto.receta_productos)
+                .selectinload(RecetaProducto.hijo)
+                .selectinload(Producto.costos_operativos),
+            selectinload(Producto.costos_operativos),
+            selectinload(Producto.micronutrientes)
+                .selectinload(ProductoMicronutriente.micronutriente),
+        ]
 
     # ══════════════════════════════════════════════════════════════════════════
     # VENTANA TABLA NUTRICIONAL + SELLOS
     # ══════════════════════════════════════════════════════════════════════════
 
-    def _mostrar_toplevel_nutricional(self, titulo_ventana: str, nombre_producto: str,
-                                      tabla_100g: dict, tabla_porcion: dict,
-                                      porcion_g: float, merma_pct: float,
-                                      factor: float, costo_kg: float,
-                                      critico: bool = False):
+    def _mostrar_toplevel_nutricional(self, titulo_ventana, nombre_producto,
+                                      tabla_100g, tabla_porcion,
+                                      porcion_g, merma_pct, factor, costo_kg,
+                                      critico=False, critico_auto=False,
+                                      humedad_final_pct=0.0,
+                                      micronutrientes=None,
+                                      caducidad_info=None):
         top = tk.Toplevel(self)
         top.title(titulo_ventana)
-        top.geometry("700x750")
+        top.geometry("740x820")
         top.config(bg=COLOR_BG)
         top.resizable(True, True)
 
         tk.Label(top, text=nombre_producto, font=FONT_TITULO, bg=COLOR_BG).pack(pady=(14, 2))
+
+        # ── Cabecera: información de proceso (humedad separada) ──
+        info_proceso = f"Humedad: {humedad_final_pct:.2f}%  |  Merma: {merma_pct:.4f}%  |  Factor: ×{factor:.5f}"
+        tk.Label(top, text=info_proceso, font=FONT_PEQUEÑA, bg=COLOR_BG, fg="#555555").pack()
+
         crit_txt = "Sí" if critico else "No"
-        info = (f"Crítico: {crit_txt}  |  Merma: {merma_pct:.4f}%  |  Factor: ×{factor:.5f}  |  "
-                f"Costo final: ${costo_kg:,.2f} /kg")
-        tk.Label(top, text=info, font=FONT_PEQUEÑA, bg=COLOR_BG, fg="#555555").pack()
+        if critico != critico_auto:
+            crit_txt += f"  ⚠️ (auto-detección sugiere {'Sí' if critico_auto else 'No'})"
+        info_negocio = f"Crítico: {crit_txt}  |  Costo final: ${costo_kg:,.2f} /kg"
+        tk.Label(top, text=info_negocio, font=FONT_PEQUEÑA, bg=COLOR_BG, fg="#555555").pack()
+
+        # ── Caducidad ──
+        if caducidad_info:
+            fecha_est = caducidad_info.get("fecha_estimada")
+            proximos = caducidad_info.get("proximos", [])
+            cad_txt = f"Caducidad estimada: {fecha_est}" if fecha_est else "Sin fechas de caducidad"
+            tk.Label(top, text=cad_txt, font=FONT_PEQUEÑA, bg=COLOR_BG,
+                     fg=COLOR_PELIGRO if fecha_est else "#757575").pack()
+            if proximos:
+                prox_txt = "  |  ".join(f"{n}: {f}" for n, f in proximos[:3])
+                tk.Label(top, text=f"Próximos: {prox_txt}",
+                         font=FONT_PEQUEÑA, bg=COLOR_BG, fg="#757575").pack()
+
         tk.Frame(top, bg="#BDBDBD", height=1).pack(fill="x", padx=20, pady=8)
 
-        # ── Tabla nutricional ─────────────────────────────────────────────────
+        # ── Tabla nutricional con redondeo Minsal ──
         frame_tree = tk.Frame(top, bg=COLOR_BG)
         frame_tree.pack(fill="both", expand=True, padx=15, pady=(0, 5))
 
@@ -208,8 +240,8 @@ class AppNutricion(tk.Tk):
         tree.heading("c100", text="Por 100 g")
         tree.heading("cpor", text=col_p)
         tree.column("nut",  width=295)
-        tree.column("c100", width=110, anchor="center")
-        tree.column("cpor", width=110, anchor="center")
+        tree.column("c100", width=120, anchor="center")
+        tree.column("cpor", width=120, anchor="center")
 
         sb = ttk.Scrollbar(frame_tree, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=sb.set)
@@ -220,15 +252,27 @@ class AppNutricion(tk.Tk):
             label = ETIQUETAS_NUTRIENTES.get(key, key)
             v100 = tabla_100g.get(key, 0.0)
             vpor = tabla_porcion.get(key, 0.0)
-            tree.insert("", "end", values=(label, f"{v100:.4f}", f"{vpor:.4f}"))
+            tree.insert("", "end", values=(
+                label, redondear_minsal(v100), redondear_minsal(vpor)))
 
-        # ── Sección de sellos / destacadores ──────────────────────────────────
+        # ── Micronutrientes filtrados ──
+        if micronutrientes:
+            tree.insert("", "end", values=("", "", ""))
+            tree.insert("", "end", values=("── Micronutrientes ──", "", ""))
+            for mn in micronutrientes:
+                dest = " ★" if mn["destacado"] else ""
+                label = f"    {mn['nombre']} ({mn['unidad']}){dest}"
+                tree.insert("", "end", values=(
+                    label,
+                    redondear_minsal(mn["cantidad_100g"]),
+                    f"{redondear_minsal(mn['cantidad_porcion'])} ({mn['pct_ddr']:.1f}% DDR)"))
+
+        # ── Sección de sellos / destacadores ──
         tk.Frame(top, bg="#BDBDBD", height=1).pack(fill="x", padx=20, pady=4)
         frame_norm = tk.Frame(top, bg=COLOR_BG)
         frame_norm.pack(fill="x", padx=15, pady=(0, 4))
 
         tk.Label(frame_norm, text="Normativa:", font=FONT_NORMAL, bg=COLOR_BG).pack(side="left")
-
         normativas = listar_normativas()
         norm_var = tk.StringVar()
         combo_norm = ttk.Combobox(frame_norm, textvariable=norm_var,
@@ -251,7 +295,6 @@ class AppNutricion(tk.Tk):
         tree_sellos.column("resultado", width=200, anchor="center")
         tree_sellos.pack(fill="x", expand=True)
 
-        # Tag styling for results
         tree_sellos.tag_configure("sello_si", foreground="#C62828")
         tree_sellos.tag_configure("sello_no", foreground="#43A047")
         tree_sellos.tag_configure("dest_si", foreground="#1565C0")
@@ -294,10 +337,8 @@ class AppNutricion(tk.Tk):
         self._boton(frame, "📦  Gestionar Ingredientes",
                     self.mostrar_menu_ingredientes,
                     color_bg=COLOR_ACENTO, color_fg="white").pack(pady=5)
-        self._boton(frame, "🧪  Gestionar SubProductos",
-                    self.mostrar_menu_subproductos).pack(pady=5)
-        self._boton(frame, "🏭  Gestionar Producto Final",
-                    self.mostrar_menu_producto_final).pack(pady=5)
+        self._boton(frame, "🧪  Gestionar Productos",
+                    self.mostrar_menu_productos).pack(pady=5)
 
         tk.Frame(frame, bg="#BDBDBD", height=1).pack(fill="x", pady=12)
 
@@ -345,7 +386,7 @@ class AppNutricion(tk.Tk):
         self._boton(self.container, "← Volver",
                     self.mostrar_menu_ingredientes, ancho=30).pack()
 
-    def mostrar_formulario(self, modo: str):
+    def mostrar_formulario(self, modo):
         self.limpiar_pantalla()
         self._critico_var = tk.BooleanVar(value=False)
         titulos = {
@@ -381,7 +422,7 @@ class AppNutricion(tk.Tk):
                        variable=self._critico_var,
                        font=FONT_BOLD, bg=COLOR_BG, fg=COLOR_TEXTO,
                        selectcolor="#FFFFFF", activebackground=COLOR_BG).pack(side="left")
-        tk.Label(row_crit, text="(aplica sellos de advertencia)",
+        tk.Label(row_crit, text="(ingrediente aporta azúcar/sodio/grasa añadida)",
                  font=FONT_PEQUEÑA, bg=COLOR_BG, fg="#757575").pack(side="left", padx=8)
 
         for key, (label_text, _) in self.campos_formulario.items():
@@ -392,6 +433,35 @@ class AppNutricion(tk.Tk):
             entry = tk.Entry(row, font=FONT_NORMAL, relief="solid", bd=1)
             entry.pack(side="right", expand=True, fill="x")
             self.entries[key] = entry
+
+        # Trazabilidad: fecha vencimiento ficha y PDF
+        self._separador(frame_form)
+        tk.Label(frame_form, text="Trazabilidad", font=FONT_BOLD, bg=COLOR_BG).pack(anchor="w", padx=4)
+
+        row_fv = tk.Frame(frame_form, bg=COLOR_BG)
+        row_fv.pack(fill="x", pady=3, padx=4)
+        tk.Label(row_fv, text="Vencimiento ficha (AAAA-MM-DD):", font=FONT_NORMAL,
+                 bg=COLOR_BG, width=26, anchor="w").pack(side="left")
+        self._e_fecha_venc = tk.Entry(row_fv, font=FONT_NORMAL, relief="solid", bd=1)
+        self._e_fecha_venc.pack(side="right", expand=True, fill="x")
+
+        row_pdf = tk.Frame(frame_form, bg=COLOR_BG)
+        row_pdf.pack(fill="x", pady=3, padx=4)
+        tk.Label(row_pdf, text="Ficha técnica (PDF):", font=FONT_NORMAL,
+                 bg=COLOR_BG, width=26, anchor="w").pack(side="left")
+        self._e_pdf_path = tk.Entry(row_pdf, font=FONT_NORMAL, relief="solid", bd=1)
+        self._e_pdf_path.pack(side="left", expand=True, fill="x")
+        self._boton(row_pdf, "📂", lambda: self._seleccionar_pdf(),
+                    ancho=4).pack(side="right", padx=4)
+
+    def _seleccionar_pdf(self):
+        path = filedialog.askopenfilename(
+            title="Seleccionar ficha técnica PDF",
+            filetypes=[("PDF", "*.pdf"), ("Todos", "*.*")],
+            initialdir="data/fichas_tecnicas")
+        if path:
+            self._e_pdf_path.delete(0, tk.END)
+            self._e_pdf_path.insert(0, path)
 
     def cargar_datos_en_formulario(self, event=None):
         seleccion = self.combo_busqueda.get()
@@ -409,10 +479,17 @@ class AppNutricion(tk.Tk):
                     valor = round(valor * 100.0, 6)
                 entry.delete(0, tk.END)
                 entry.insert(0, str(valor))
+            # Trazabilidad
+            self._e_fecha_venc.delete(0, tk.END)
+            if ing.fecha_vencimiento_ficha:
+                self._e_fecha_venc.insert(0, str(ing.fecha_vencimiento_ficha))
+            self._e_pdf_path.delete(0, tk.END)
+            if ing.ruta_pdf_ficha:
+                self._e_pdf_path.insert(0, ing.ruta_pdf_ficha)
 
-    def guardar_ingrediente(self, modo: str):
+    def guardar_ingrediente(self, modo):
         try:
-            datos: dict = {}
+            datos = {}
             for key, (label_text, tipo_dato) in self.campos_formulario.items():
                 valor_str = self.entries[key].get().strip()
                 if not valor_str:
@@ -426,6 +503,15 @@ class AppNutricion(tk.Tk):
                     valor = valor / 100.0
                 datos[key] = valor
             datos["critico"] = self._critico_var.get()
+
+            # Trazabilidad
+            fv_str = self._e_fecha_venc.get().strip()
+            if fv_str:
+                from datetime import date
+                datos["fecha_vencimiento_ficha"] = date.fromisoformat(fv_str)
+            pdf_str = self._e_pdf_path.get().strip()
+            if pdf_str:
+                datos["ruta_pdf_ficha"] = pdf_str
 
             with Session(engine) as s:
                 if modo == "modificar":
@@ -498,69 +584,83 @@ class AppNutricion(tk.Tk):
             messagebox.showerror("Error inesperado", str(exc))
 
     # ══════════════════════════════════════════════════════════════════════════
-    # SUBPRODUCTOS
+    # PRODUCTOS (modelo unificado — SubProductos + Productos Finales)
     # ══════════════════════════════════════════════════════════════════════════
 
-    def mostrar_menu_subproductos(self):
+    def mostrar_menu_productos(self):
         self.limpiar_pantalla()
-        self._titulo(self.container, "🧪 SubProductos")
+        self._titulo(self.container, "🧪 Gestionar Productos")
 
         frame = tk.Frame(self.container, bg=COLOR_BG)
         frame.pack(pady=10)
 
         self._boton(frame, "🧪  Crear SubProducto",
-                    lambda: self.mostrar_formulario_subproducto('crear'),
+                    lambda: self.mostrar_formulario_producto('crear', 'subproducto'),
                     color_bg=COLOR_ACENTO, color_fg="white").pack(pady=5)
-        self._boton(frame, "✏️  Editar SubProducto",
-                    lambda: self._seleccionar_sp_y_hacer(
-                        lambda sid: self.mostrar_formulario_subproducto('editar', sid))).pack(pady=5)
+        self._boton(frame, "🏭  Crear Producto Final",
+                    lambda: self.mostrar_formulario_producto('crear', 'producto_final'),
+                    color_bg=COLOR_ACENTO, color_fg="white").pack(pady=5)
+
+        tk.Frame(frame, bg="#BDBDBD", height=1).pack(fill="x", pady=8)
+
+        self._boton(frame, "✏️  Editar Producto",
+                    lambda: self._seleccionar_prod_y_hacer(
+                        lambda pid: self.mostrar_formulario_producto('editar', None, pid))).pack(pady=5)
         self._boton(frame, "📊  Ver Tabla Nutricional",
-                    lambda: self._seleccionar_sp_y_hacer(self._ver_tabla_sp)).pack(pady=5)
-        self._boton(frame, "🗑️  Eliminar SubProducto",
-                    self.mostrar_vista_eliminar_sp,
+                    lambda: self._seleccionar_prod_y_hacer(self._ver_tabla_prod)).pack(pady=5)
+        self._boton(frame, "🗑️  Eliminar Producto",
+                    self.mostrar_vista_eliminar_prod,
                     color_bg=COLOR_PELIGRO, color_fg="white").pack(pady=5)
 
-        tk.Frame(frame, bg="#BDBDBD", height=1).pack(fill="x", pady=12)
+        tk.Frame(frame, bg="#BDBDBD", height=1).pack(fill="x", pady=8)
         self._boton(frame, "← Volver al Menú Principal",
                     self.mostrar_menu_principal, ancho=30).pack(pady=5)
 
-    def _seleccionar_sp_y_hacer(self, callback):
+    def _seleccionar_prod_y_hacer(self, callback):
         self.limpiar_pantalla()
-        self._titulo(self.container, "Seleccionar SubProducto")
+        self._titulo(self.container, "Seleccionar Producto")
 
         fb = tk.Frame(self.container, bg=COLOR_BG)
         fb.pack(fill="x", padx=20, pady=10)
-        tk.Label(fb, text="🔍  Buscar SubProducto:", font=FONT_PEQUEÑA, bg=COLOR_BG).pack(anchor="w")
-        combo = self._crear_combobox_sp(fb, lambda e: None)
+        tk.Label(fb, text="🔍  Buscar Producto:", font=FONT_PEQUEÑA, bg=COLOR_BG).pack(anchor="w")
+        combo = self._crear_combobox_producto(fb, lambda e: None)
         combo.pack(fill="x", pady=4)
 
         def _hacer():
             nombre = combo.get()
-            if not nombre or nombre not in self.mapa_subproductos:
-                messagebox.showerror("Error", "Selecciona un SubProducto válido.")
+            if not nombre or nombre not in self.mapa_productos:
+                messagebox.showerror("Error", "Selecciona un Producto válido.")
                 return
-            callback(self.mapa_subproductos[nombre])
+            callback(self.mapa_productos[nombre])
 
         fbot = tk.Frame(self.container, bg=COLOR_BG)
         fbot.pack(fill="x", padx=20, pady=10)
-        self._boton(fbot, "← Volver", self.mostrar_menu_subproductos, ancho=14).pack(side="left")
+        self._boton(fbot, "← Volver", self.mostrar_menu_productos, ancho=14).pack(side="left")
         self._boton(fbot, "✓ Seleccionar", _hacer,
                     color_bg=COLOR_ACENTO, color_fg="white", ancho=16).pack(side="right")
 
-    # ── Formulario crear/editar SubProducto ──────────────────────────────────
+    # ── Formulario crear/editar Producto (unificado) ──────────────────────────
 
-    def mostrar_formulario_subproducto(self, modo: str, sp_id: int | None = None):
+    def mostrar_formulario_producto(self, modo, tipo_prod=None, prod_id=None):
         self.limpiar_pantalla()
-        self._sp_receta: list[dict] = []
-        self._sp_costos: list[dict] = []
+        self._prod_receta_ing: list[dict] = []
+        self._prod_receta_prod: list[dict] = []
+        self._prod_costos: list[dict] = []
         self._critico_var = tk.BooleanVar(value=False)
 
-        titulo = "Nuevo SubProducto" if modo == 'crear' else "Editar SubProducto"
+        if modo == 'editar' and prod_id:
+            with Session(engine) as s:
+                p = s.get(Producto, prod_id)
+                tipo_prod = p.tipo if p else 'subproducto'
+
+        es_pf = (tipo_prod == "producto_final")
+        label_tipo = "Producto Final" if es_pf else "SubProducto"
+        titulo = f"Nuevo {label_tipo}" if modo == 'crear' else f"Editar {label_tipo}"
         self._titulo(self.container, titulo)
 
-        self._barra_botones(self.mostrar_menu_subproductos,
-                            lambda: self._guardar_subproducto(modo, sp_id),
-                            "💾  Guardar SubProducto")
+        self._barra_botones(self.mostrar_menu_productos,
+                            lambda: self._guardar_producto(modo, tipo_prod, prod_id),
+                            f"💾  Guardar {label_tipo}")
         self._separador(self.container)
 
         outer, frame_form, _ = self._crear_scroll_frame(self.container)
@@ -571,26 +671,41 @@ class AppNutricion(tk.Tk):
                             bg=COLOR_BG, font=FONT_NORMAL, fg=COLOR_TEXTO)
         lf1.pack(fill="x", padx=5, pady=5)
 
-        self._sp_entries: dict[str, tk.Entry] = {}
-        for key, label in [("nombre",        "Nombre:"),
-                            ("descripcion",   "Descripción (opcional):"),
-                            ("humedad_final", "Humedad final (%, ej: 3.0):")]:
+        self._prod_entries: dict[str, tk.Entry] = {}
+        campos = [
+            ("nombre",        "Nombre:"),
+            ("descripcion",   "Descripción (opcional):"),
+            ("humedad_final", "Humedad final (%, ej: 3.0):"),
+        ]
+        if es_pf:
+            campos.extend([
+                ("porcion_g",     "Porción (g, ej: 25):"),
+                ("gramaje_g",     "Gramaje empaque (g, ej: 200):"),
+                ("meses_caducidad", "Meses caducidad (opcional):"),
+            ])
+
+        defaults = {"porcion_g": "25", "gramaje_g": "200"}
+        for key, label in campos:
             row = tk.Frame(lf1, bg=COLOR_BG)
             row.pack(fill="x", padx=8, pady=3)
             tk.Label(row, text=label, font=FONT_NORMAL, bg=COLOR_BG,
                      width=28, anchor="w").pack(side="left")
             e = tk.Entry(row, font=FONT_NORMAL, relief="solid", bd=1)
+            if key in defaults:
+                e.insert(0, defaults[key])
             e.pack(side="right", expand=True, fill="x")
-            self._sp_entries[key] = e
+            self._prod_entries[key] = e
 
+        # Checkbox Crítico con auto-detección
         row_crit = tk.Frame(lf1, bg=COLOR_BG)
         row_crit.pack(fill="x", padx=8, pady=3)
         tk.Checkbutton(row_crit, text="  Crítico",
                        variable=self._critico_var,
                        font=FONT_BOLD, bg=COLOR_BG, fg=COLOR_TEXTO,
                        selectcolor="#FFFFFF", activebackground=COLOR_BG).pack(side="left")
-        tk.Label(row_crit, text="(aplica sellos de advertencia)",
-                 font=FONT_PEQUEÑA, bg=COLOR_BG, fg="#757575").pack(side="left", padx=8)
+        self._lbl_critico_auto = tk.Label(row_crit, text="(aplica sellos de advertencia)",
+                 font=FONT_PEQUEÑA, bg=COLOR_BG, fg="#757575")
+        self._lbl_critico_auto.pack(side="left", padx=8)
 
         # ── Sección 2: Receta de ingredientes ──
         lf2 = tk.LabelFrame(frame_form, text=" Receta de Ingredientes (% en peso) ",
@@ -600,33 +715,67 @@ class AppNutricion(tk.Tk):
         fa = tk.Frame(lf2, bg=COLOR_BG)
         fa.pack(fill="x", padx=8, pady=(8, 4))
         tk.Label(fa, text="Ingrediente:", font=FONT_PEQUEÑA, bg=COLOR_BG).pack(side="left")
-        self._sp_combo_ing = self._crear_combobox_buscable(fa, lambda e: None)
-        self._sp_combo_ing.pack(side="left", padx=4)
+        self._prod_combo_ing = self._crear_combobox_buscable(fa, lambda e: None)
+        self._prod_combo_ing.pack(side="left", padx=4)
         tk.Label(fa, text="%:", font=FONT_PEQUEÑA, bg=COLOR_BG).pack(side="left")
-        self._sp_e_pct_ing = tk.Entry(fa, font=FONT_NORMAL, width=8, relief="solid", bd=1)
-        self._sp_e_pct_ing.pack(side="left", padx=4)
-        self._boton(fa, "➕", self._sp_agregar_ing,
+        self._prod_e_pct_ing = tk.Entry(fa, font=FONT_NORMAL, width=8, relief="solid", bd=1)
+        self._prod_e_pct_ing.pack(side="left", padx=4)
+        self._boton(fa, "➕", self._prod_agregar_ing,
                     color_bg=COLOR_ACENTO, color_fg="white", ancho=4).pack(side="left")
 
         ft = tk.Frame(lf2, bg=COLOR_BG)
         ft.pack(fill="x", padx=8, pady=2)
-        self._sp_tree_receta = ttk.Treeview(ft,
-            columns=("ingrediente", "pct"), show="headings", height=5)
-        self._sp_tree_receta.heading("ingrediente", text="Ingrediente")
-        self._sp_tree_receta.heading("pct", text="%")
-        self._sp_tree_receta.column("ingrediente", width=360)
-        self._sp_tree_receta.column("pct", width=80, anchor="center")
-        sb_i = ttk.Scrollbar(ft, orient="vertical", command=self._sp_tree_receta.yview)
-        self._sp_tree_receta.configure(yscrollcommand=sb_i.set)
-        self._sp_tree_receta.pack(side="left", fill="x", expand=True)
+        self._prod_tree_receta_ing = ttk.Treeview(ft,
+            columns=("ingrediente", "pct"), show="headings", height=4)
+        self._prod_tree_receta_ing.heading("ingrediente", text="Ingrediente")
+        self._prod_tree_receta_ing.heading("pct", text="%")
+        self._prod_tree_receta_ing.column("ingrediente", width=360)
+        self._prod_tree_receta_ing.column("pct", width=80, anchor="center")
+        sb_i = ttk.Scrollbar(ft, orient="vertical", command=self._prod_tree_receta_ing.yview)
+        self._prod_tree_receta_ing.configure(yscrollcommand=sb_i.set)
+        self._prod_tree_receta_ing.pack(side="left", fill="x", expand=True)
         sb_i.pack(side="right", fill="y")
 
         fc = tk.Frame(lf2, bg=COLOR_BG)
         fc.pack(fill="x", padx=8, pady=(2, 8))
-        self._sp_lbl_total = tk.Label(fc, text="Total: 0.00%",
-                                      font=FONT_NORMAL, bg=COLOR_BG, fg=COLOR_PELIGRO)
-        self._sp_lbl_total.pack(side="left")
-        self._boton(fc, "🗑️ Quitar fila", self._sp_quitar_ing,
+        self._boton(fc, "🗑️ Quitar fila", self._prod_quitar_ing,
+                    color_bg=COLOR_PELIGRO, color_fg="white", ancho=14).pack(side="right")
+
+        # ── Sección 2b: Composición de otros Productos ──
+        lf2b = tk.LabelFrame(frame_form, text=" Composición de Productos (% en peso) ",
+                             bg=COLOR_BG, font=FONT_NORMAL, fg=COLOR_TEXTO)
+        lf2b.pack(fill="x", padx=5, pady=5)
+
+        fa2 = tk.Frame(lf2b, bg=COLOR_BG)
+        fa2.pack(fill="x", padx=8, pady=(8, 4))
+        tk.Label(fa2, text="Producto:", font=FONT_PEQUEÑA, bg=COLOR_BG).pack(side="left")
+        self._prod_combo_prod = self._crear_combobox_producto(fa2, lambda e: None)
+        self._prod_combo_prod.pack(side="left", padx=4)
+        tk.Label(fa2, text="%:", font=FONT_PEQUEÑA, bg=COLOR_BG).pack(side="left")
+        self._prod_e_pct_prod = tk.Entry(fa2, font=FONT_NORMAL, width=8, relief="solid", bd=1)
+        self._prod_e_pct_prod.pack(side="left", padx=4)
+        self._boton(fa2, "➕", self._prod_agregar_prod,
+                    color_bg=COLOR_ACENTO, color_fg="white", ancho=4).pack(side="left")
+
+        ft2 = tk.Frame(lf2b, bg=COLOR_BG)
+        ft2.pack(fill="x", padx=8, pady=2)
+        self._prod_tree_receta_prod = ttk.Treeview(ft2,
+            columns=("producto", "pct"), show="headings", height=4)
+        self._prod_tree_receta_prod.heading("producto", text="Producto")
+        self._prod_tree_receta_prod.heading("pct", text="%")
+        self._prod_tree_receta_prod.column("producto", width=360)
+        self._prod_tree_receta_prod.column("pct", width=80, anchor="center")
+        sb_p = ttk.Scrollbar(ft2, orient="vertical", command=self._prod_tree_receta_prod.yview)
+        self._prod_tree_receta_prod.configure(yscrollcommand=sb_p.set)
+        self._prod_tree_receta_prod.pack(side="left", fill="x", expand=True)
+        sb_p.pack(side="right", fill="y")
+
+        fc2 = tk.Frame(lf2b, bg=COLOR_BG)
+        fc2.pack(fill="x", padx=8, pady=(2, 4))
+        self._prod_lbl_total = tk.Label(fc2, text="Total: 0.00%",
+                                        font=FONT_NORMAL, bg=COLOR_BG, fg=COLOR_PELIGRO)
+        self._prod_lbl_total.pack(side="left")
+        self._boton(fc2, "🗑️ Quitar fila", self._prod_quitar_prod,
                     color_bg=COLOR_PELIGRO, color_fg="white", ancho=14).pack(side="right")
 
         # ── Sección 3: Cascada de costos ──
@@ -637,64 +786,104 @@ class AppNutricion(tk.Tk):
         fa3 = tk.Frame(lf3, bg=COLOR_BG)
         fa3.pack(fill="x", padx=8, pady=(8, 4))
         tk.Label(fa3, text="Nombre:", font=FONT_PEQUEÑA, bg=COLOR_BG).pack(side="left")
-        self._sp_e_cnombre = tk.Entry(fa3, font=FONT_NORMAL, width=14, relief="solid", bd=1)
-        self._sp_e_cnombre.pack(side="left", padx=3)
+        self._prod_e_cnombre = tk.Entry(fa3, font=FONT_NORMAL, width=14, relief="solid", bd=1)
+        self._prod_e_cnombre.pack(side="left", padx=3)
         tk.Label(fa3, text="Tipo:", font=FONT_PEQUEÑA, bg=COLOR_BG).pack(side="left")
-        self._sp_cb_ctipo = ttk.Combobox(fa3, values=["porcentual", "fijo"],
-                                          state="readonly", width=10, font=FONT_NORMAL)
-        self._sp_cb_ctipo.set("porcentual")
-        self._sp_cb_ctipo.pack(side="left", padx=3)
+        self._prod_cb_ctipo = ttk.Combobox(fa3, values=["porcentual", "fijo"],
+                                            state="readonly", width=10, font=FONT_NORMAL)
+        self._prod_cb_ctipo.set("porcentual")
+        self._prod_cb_ctipo.pack(side="left", padx=3)
         tk.Label(fa3, text="Valor:", font=FONT_PEQUEÑA, bg=COLOR_BG).pack(side="left")
-        self._sp_e_cvalor = tk.Entry(fa3, font=FONT_NORMAL, width=8, relief="solid", bd=1)
-        self._sp_e_cvalor.pack(side="left", padx=3)
+        self._prod_e_cvalor = tk.Entry(fa3, font=FONT_NORMAL, width=8, relief="solid", bd=1)
+        self._prod_e_cvalor.pack(side="left", padx=3)
         tk.Label(fa3, text="(% o $/kg)", font=FONT_PEQUEÑA, bg=COLOR_BG,
                  fg="#757575").pack(side="left", padx=2)
-        self._boton(fa3, "➕", self._sp_agregar_costo,
+        self._boton(fa3, "➕", self._prod_agregar_costo,
                     color_bg=COLOR_ACENTO, color_fg="white", ancho=4).pack(side="left", padx=4)
 
         ft3 = tk.Frame(lf3, bg=COLOR_BG)
         ft3.pack(fill="x", padx=8, pady=2)
-        self._sp_tree_costos = ttk.Treeview(ft3,
-            columns=("orden", "nombre", "tipo", "valor"), show="headings", height=5)
-        self._sp_tree_costos.heading("orden", text="#")
-        self._sp_tree_costos.heading("nombre", text="Proceso")
-        self._sp_tree_costos.heading("tipo", text="Tipo")
-        self._sp_tree_costos.heading("valor", text="Valor")
-        self._sp_tree_costos.column("orden", width=30, anchor="center")
-        self._sp_tree_costos.column("nombre", width=200)
-        self._sp_tree_costos.column("tipo", width=100, anchor="center")
-        self._sp_tree_costos.column("valor", width=100, anchor="center")
-        sb_c = ttk.Scrollbar(ft3, orient="vertical", command=self._sp_tree_costos.yview)
-        self._sp_tree_costos.configure(yscrollcommand=sb_c.set)
-        self._sp_tree_costos.pack(side="left", fill="x", expand=True)
+        self._prod_tree_costos = ttk.Treeview(ft3,
+            columns=("orden", "nombre", "tipo", "valor"), show="headings", height=4)
+        self._prod_tree_costos.heading("orden", text="#")
+        self._prod_tree_costos.heading("nombre", text="Proceso")
+        self._prod_tree_costos.heading("tipo", text="Tipo")
+        self._prod_tree_costos.heading("valor", text="Valor")
+        self._prod_tree_costos.column("orden", width=30, anchor="center")
+        self._prod_tree_costos.column("nombre", width=200)
+        self._prod_tree_costos.column("tipo", width=100, anchor="center")
+        self._prod_tree_costos.column("valor", width=100, anchor="center")
+        sb_c = ttk.Scrollbar(ft3, orient="vertical", command=self._prod_tree_costos.yview)
+        self._prod_tree_costos.configure(yscrollcommand=sb_c.set)
+        self._prod_tree_costos.pack(side="left", fill="x", expand=True)
         sb_c.pack(side="right", fill="y")
 
         fc3 = tk.Frame(lf3, bg=COLOR_BG)
         fc3.pack(fill="x", padx=8, pady=(2, 8))
-        self._boton(fc3, "🗑️ Quitar paso", self._sp_quitar_costo,
+        self._boton(fc3, "🗑️ Quitar paso", self._prod_quitar_costo,
                     color_bg=COLOR_PELIGRO, color_fg="white", ancho=14).pack(side="right")
 
-        if modo == 'editar' and sp_id:
-            self._sp_cargar_existente(sp_id)
+        if modo == 'editar' and prod_id:
+            self._prod_cargar_existente(prod_id)
 
-    # ── Helpers del formulario SP ─────────────────────────────────────────────
+    # ── Helpers del formulario Producto ────────────────────────────────────────
 
-    def _sp_refrescar_tree_receta(self):
-        for item in self._sp_tree_receta.get_children():
-            self._sp_tree_receta.delete(item)
-        total = 0.0
-        for fila in self._sp_receta:
-            self._sp_tree_receta.insert("", "end",
-                values=(fila["nombre"], f"{fila['pct']:.4f}"))
-            total += fila["pct"]
+    def _prod_actualizar_total(self):
+        total_ing = sum(f["pct"] for f in self._prod_receta_ing)
+        total_prod = sum(f["pct"] for f in self._prod_receta_prod)
+        total = total_ing + total_prod
         ok = abs(total - 100.0) < 0.01
-        self._sp_lbl_total.config(
-            text=f"Total: {total:.4f}%  {'✅' if ok else '⚠️ debe ser 100.00%'}",
+        self._prod_lbl_total.config(
+            text=f"Total: {total:.4f}% (Ing: {total_ing:.2f}% + Prod: {total_prod:.2f}%)  "
+                 f"{'✅' if ok else '⚠️ debe ser 100.00%'}",
             fg=COLOR_EXITO if ok else COLOR_PELIGRO)
 
-    def _sp_agregar_ing(self):
-        nombre = self._sp_combo_ing.get().strip()
-        pct_str = self._sp_e_pct_ing.get().strip().replace(",", ".")
+        # Auto-detección de crítico
+        hay_critico = False
+        for fila in self._prod_receta_ing:
+            with Session(engine) as s:
+                ing = s.get(Ingrediente, fila["ing_id"])
+                if ing and ing.critico:
+                    hay_critico = True
+                    break
+        if not hay_critico:
+            for fila in self._prod_receta_prod:
+                with Session(engine) as s:
+                    p = s.get(Producto, fila["prod_id"], options=self._selectinload_completo())
+                    if p and p.critico_calculado():
+                        hay_critico = True
+                        break
+        if hay_critico and not self._critico_var.get():
+            self._lbl_critico_auto.config(
+                text="⚠️ Auto-detección: ingrediente crítico encontrado",
+                fg=COLOR_WARN)
+        elif not hay_critico and self._critico_var.get():
+            self._lbl_critico_auto.config(
+                text="ℹ️ Ningún ingrediente crítico detectado (forzado manual)",
+                fg="#757575")
+        else:
+            self._lbl_critico_auto.config(
+                text="(aplica sellos de advertencia)", fg="#757575")
+
+    def _prod_refrescar_tree_receta_ing(self):
+        for item in self._prod_tree_receta_ing.get_children():
+            self._prod_tree_receta_ing.delete(item)
+        for fila in self._prod_receta_ing:
+            self._prod_tree_receta_ing.insert("", "end",
+                values=(fila["nombre"], f"{fila['pct']:.4f}"))
+        self._prod_actualizar_total()
+
+    def _prod_refrescar_tree_receta_prod(self):
+        for item in self._prod_tree_receta_prod.get_children():
+            self._prod_tree_receta_prod.delete(item)
+        for fila in self._prod_receta_prod:
+            self._prod_tree_receta_prod.insert("", "end",
+                values=(fila["nombre"], f"{fila['pct']:.4f}"))
+        self._prod_actualizar_total()
+
+    def _prod_agregar_ing(self):
+        nombre = self._prod_combo_ing.get().strip()
+        pct_str = self._prod_e_pct_ing.get().strip().replace(",", ".")
         if not nombre or nombre not in self.mapa_ingredientes:
             messagebox.showerror("Error", "Selecciona un ingrediente válido de la lista.")
             return
@@ -705,456 +894,32 @@ class AppNutricion(tk.Tk):
         except ValueError:
             messagebox.showerror("Error", "Ingresa un porcentaje válido (número > 0).")
             return
-        for fila in self._sp_receta:
+        for fila in self._prod_receta_ing:
             if fila["ing_id"] == self.mapa_ingredientes[nombre]:
                 fila["pct"] = pct
-                self._sp_refrescar_tree_receta()
-                self._sp_e_pct_ing.delete(0, tk.END)
+                self._prod_refrescar_tree_receta_ing()
+                self._prod_e_pct_ing.delete(0, tk.END)
                 return
-        self._sp_receta.append({"ing_id": self.mapa_ingredientes[nombre],
-                                 "nombre": nombre, "pct": pct})
-        self._sp_refrescar_tree_receta()
-        self._sp_combo_ing.set("")
-        self._sp_e_pct_ing.delete(0, tk.END)
+        self._prod_receta_ing.append({"ing_id": self.mapa_ingredientes[nombre],
+                                       "nombre": nombre, "pct": pct})
+        self._prod_refrescar_tree_receta_ing()
+        self._prod_combo_ing.set("")
+        self._prod_e_pct_ing.delete(0, tk.END)
 
-    def _sp_quitar_ing(self):
-        sel = self._sp_tree_receta.selection()
+    def _prod_quitar_ing(self):
+        sel = self._prod_tree_receta_ing.selection()
         if not sel:
             messagebox.showerror("Sin selección", "Selecciona una fila para quitar.")
             return
-        nombre = self._sp_tree_receta.item(sel[0])["values"][0]
-        self._sp_receta = [f for f in self._sp_receta if f["nombre"] != nombre]
-        self._sp_refrescar_tree_receta()
+        nombre = self._prod_tree_receta_ing.item(sel[0])["values"][0]
+        self._prod_receta_ing = [f for f in self._prod_receta_ing if f["nombre"] != nombre]
+        self._prod_refrescar_tree_receta_ing()
 
-    def _sp_refrescar_tree_costos(self):
-        for item in self._sp_tree_costos.get_children():
-            self._sp_tree_costos.delete(item)
-        for i, fila in enumerate(self._sp_costos, 1):
-            vd = (f"{fila['valor']:.4f}%" if fila["tipo"] == "porcentual"
-                  else f"${fila['valor']:,.2f}")
-            self._sp_tree_costos.insert("", "end",
-                values=(i, fila["nombre"], fila["tipo"], vd))
-
-    def _sp_agregar_costo(self):
-        nombre = self._sp_e_cnombre.get().strip()
-        tipo = self._sp_cb_ctipo.get()
-        valor_str = self._sp_e_cvalor.get().strip().replace(",", ".")
-        if not nombre:
-            messagebox.showerror("Error", "Ingresa un nombre para el proceso.")
-            return
-        try:
-            valor = float(valor_str)
-            if valor < 0:
-                raise ValueError()
-        except ValueError:
-            messagebox.showerror("Error", "Ingresa un valor numérico válido (>= 0).")
-            return
-        self._sp_costos.append({"nombre": nombre, "tipo": tipo, "valor": valor})
-        self._sp_refrescar_tree_costos()
-        self._sp_e_cnombre.delete(0, tk.END)
-        self._sp_e_cvalor.delete(0, tk.END)
-
-    def _sp_quitar_costo(self):
-        sel = self._sp_tree_costos.selection()
-        if not sel:
-            messagebox.showerror("Sin selección", "Selecciona un paso para quitar.")
-            return
-        orden = int(self._sp_tree_costos.item(sel[0])["values"][0]) - 1
-        self._sp_costos.pop(orden)
-        self._sp_refrescar_tree_costos()
-
-    def _sp_cargar_existente(self, sp_id: int):
-        with Session(engine) as s:
-            sp = s.get(SubProducto, sp_id, options=[
-                selectinload(SubProducto.receta_ingredientes)
-                    .selectinload(SubProductoIngrediente.ingrediente),
-                selectinload(SubProducto.costos_operativos),
-            ])
-            if sp is None:
-                return
-            self._sp_entries["nombre"].insert(0, sp.nombre)
-            self._sp_entries["descripcion"].insert(0, sp.descripcion or "")
-            self._sp_entries["humedad_final"].insert(0, str(round(sp.humedad_final * 100.0, 6)))
-            self._critico_var.set(sp.critico)
-            for rel in sp.receta_ingredientes:
-                self._sp_receta.append({
-                    "ing_id": rel.ingrediente_id,
-                    "nombre": rel.ingrediente.id_unico,
-                    "pct":    round(rel.proporcion * 100.0, 6),
-                })
-            for co in sp.costos_operativos:
-                self._sp_costos.append({
-                    "nombre": co.nombre,
-                    "tipo":   co.tipo,
-                    "valor":  round(co.valor * 100.0, 6) if co.tipo == "porcentual" else co.valor,
-                })
-        self._sp_refrescar_tree_receta()
-        self._sp_refrescar_tree_costos()
-
-    def _guardar_subproducto(self, modo: str, sp_id: int | None):
-        try:
-            nombre = self._sp_entries["nombre"].get().strip()
-            desc = self._sp_entries["descripcion"].get().strip()
-            h_str = self._sp_entries["humedad_final"].get().strip().replace(",", ".")
-            critico = self._critico_var.get()
-
-            if not nombre:
-                raise ValueError("El nombre del SubProducto no puede estar vacío.")
-            if not self._sp_receta:
-                raise ValueError("Agrega al menos un ingrediente a la receta.")
-
-            humedad_f = float(h_str) / 100.0 if h_str else 0.0
-            total_pct = sum(f["pct"] for f in self._sp_receta)
-            if abs(total_pct - 100.0) > 0.01:
-                raise ValueError(
-                    f"Los porcentajes de la receta deben sumar 100%.\n"
-                    f"Total actual: {total_pct:.4f}%")
-
-            with Session(engine) as s:
-                if modo == "crear":
-                    sp = SubProducto(nombre=nombre, descripcion=desc,
-                                     humedad_final=humedad_f, critico=critico)
-                    s.add(sp)
-                    s.flush()
-                else:
-                    sp = s.get(SubProducto, sp_id)
-                    sp.nombre = nombre
-                    sp.descripcion = desc
-                    sp.humedad_final = humedad_f
-                    sp.critico = critico
-                    sp.receta_ingredientes = []
-                    sp.costos_operativos = []
-                    s.flush()
-
-                for fila in self._sp_receta:
-                    s.add(SubProductoIngrediente(
-                        subproducto_id=sp.id,
-                        ingrediente_id=fila["ing_id"],
-                        proporcion=fila["pct"] / 100.0,
-                    ))
-                for i, fila in enumerate(self._sp_costos, 1):
-                    valor_db = (fila["valor"] / 100.0 if fila["tipo"] == "porcentual"
-                                else fila["valor"])
-                    s.add(CostoOperativo(
-                        subproducto_id=sp.id, nombre=fila["nombre"],
-                        tipo=fila["tipo"], valor=valor_db, orden=i,
-                    ))
-                s.flush()
-
-                sp_l = s.get(SubProducto, sp.id, options=[
-                    selectinload(SubProducto.receta_ingredientes)
-                        .selectinload(SubProductoIngrediente.ingrediente),
-                    selectinload(SubProducto.costos_operativos),
-                ])
-                tabla_100g  = sp_l.tabla_nutricional()
-                tabla_p     = sp_l.tabla_nutricional_porcion(25.0)
-                merma_pct   = sp_l.merma() * 100.0
-                factor      = sp_l.factor_concentracion()
-                costo_kg    = sp_l.costo_final_kg()
-                nombre_sp   = sp_l.nombre
-                critico_sp  = sp_l.critico
-
-                s.commit()
-
-            messagebox.showinfo("✅ Guardado", f"SubProducto '{nombre_sp}' guardado correctamente.")
-            self._mostrar_toplevel_nutricional(
-                f"Tabla Nutricional — {nombre_sp}",
-                nombre_sp, tabla_100g, tabla_p, 25.0, merma_pct, factor, costo_kg,
-                critico=critico_sp)
-            self.mostrar_menu_subproductos()
-
-        except ValueError as exc:
-            messagebox.showerror("Error de validación", str(exc))
-        except IntegrityError:
-            messagebox.showerror("Duplicado", "Ya existe un SubProducto con ese nombre.")
-        except Exception as exc:
-            messagebox.showerror("Error inesperado", str(exc))
-
-    def _ver_tabla_sp(self, sp_id: int):
-        try:
-            with Session(engine) as s:
-                sp = s.get(SubProducto, sp_id, options=[
-                    selectinload(SubProducto.receta_ingredientes)
-                        .selectinload(SubProductoIngrediente.ingrediente),
-                    selectinload(SubProducto.costos_operativos),
-                ])
-                if sp is None:
-                    messagebox.showerror("Error", "SubProducto no encontrado.")
-                    return
-                tabla_100g = sp.tabla_nutricional()
-                tabla_p    = sp.tabla_nutricional_porcion(25.0)
-                merma_pct  = sp.merma() * 100.0
-                factor     = sp.factor_concentracion()
-                costo      = sp.costo_final_kg()
-                nombre     = sp.nombre
-                critico    = sp.critico
-
-            self._mostrar_toplevel_nutricional(
-                f"Tabla Nutricional — {nombre}",
-                nombre, tabla_100g, tabla_p, 25.0, merma_pct, factor, costo,
-                critico=critico)
-            self.mostrar_menu_subproductos()
-        except Exception as exc:
-            messagebox.showerror("Error", str(exc))
-
-    def mostrar_vista_eliminar_sp(self):
-        self.limpiar_pantalla()
-        self._titulo(self.container, "Eliminar SubProducto")
-
-        fb = tk.Frame(self.container, bg=COLOR_BG)
-        fb.pack(fill="x", padx=20, pady=(0, 6))
-        tk.Label(fb, text="🔍  Buscar SubProducto a eliminar:",
-                 font=FONT_PEQUEÑA, bg=COLOR_BG).pack(anchor="w")
-        self._sp_combo_elim = self._crear_combobox_sp(fb, self._sp_seleccionar_elim)
-        self._sp_combo_elim.pack(fill="x", pady=4)
-
-        fbot = tk.Frame(self.container, bg=COLOR_BG)
-        fbot.pack(fill="x", padx=20, pady=(4, 0))
-        self._boton(fbot, "← Volver", self.mostrar_menu_subproductos, ancho=14).pack(side="left")
-        self._boton(fbot, "🗑️  Eliminar", self._sp_eliminar,
-                    color_bg=COLOR_PELIGRO, color_fg="white", ancho=16).pack(side="right")
-        self._separador(self.container)
-
-        self._sp_lbl_adv = tk.Label(
-            self.container, text="Selecciona un SubProducto para eliminarlo.",
-            fg="#757575", font=FONT_NORMAL, bg=COLOR_BG, wraplength=480, justify="center")
-        self._sp_lbl_adv.pack(pady=30)
-        self._sp_id_elim: int | None = None
-
-    def _sp_seleccionar_elim(self, event=None):
-        nombre = self._sp_combo_elim.get()
-        if not nombre or nombre not in self.mapa_subproductos:
-            return
-        self._sp_id_elim = self.mapa_subproductos[nombre]
-        self._sp_lbl_adv.config(
-            text=f"⚠️  ¿Eliminar SubProducto?\n\n«{nombre}»\n\nEsta acción no se puede deshacer.",
-            fg=COLOR_PELIGRO, font=("Segoe UI", 10, "bold"))
-
-    def _sp_eliminar(self):
-        if not self._sp_id_elim:
-            messagebox.showerror("Sin selección", "Selecciona un SubProducto primero.")
-            return
-        if not messagebox.askyesno("Confirmar", "¿Eliminar este SubProducto?\n\nEsta acción es irreversible."):
-            return
-        try:
-            with Session(engine) as s:
-                sp = s.get(SubProducto, self._sp_id_elim)
-                if sp:
-                    s.delete(sp)
-                    s.commit()
-            messagebox.showinfo("✅ Eliminado", "SubProducto eliminado correctamente.")
-            self.mostrar_menu_subproductos()
-        except Exception as exc:
-            messagebox.showerror("Error inesperado", str(exc))
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # PRODUCTO FINAL
-    # ══════════════════════════════════════════════════════════════════════════
-
-    def mostrar_menu_producto_final(self):
-        self.limpiar_pantalla()
-        self._titulo(self.container, "🏭 Producto Final")
-
-        frame = tk.Frame(self.container, bg=COLOR_BG)
-        frame.pack(pady=10)
-
-        self._boton(frame, "🏭  Crear Producto Final",
-                    lambda: self.mostrar_formulario_producto_final("crear"),
-                    color_bg=COLOR_ACENTO, color_fg="white").pack(pady=5)
-        self._boton(frame, "✏️  Editar Producto Final",
-                    lambda: self._seleccionar_pf_y_hacer(
-                        lambda pid: self.mostrar_formulario_producto_final("editar", pid))).pack(pady=5)
-        self._boton(frame, "📊  Ver Tabla Nutricional",
-                    lambda: self._seleccionar_pf_y_hacer(self._ver_tabla_pf)).pack(pady=5)
-        self._boton(frame, "🗑️  Eliminar Producto Final",
-                    self.mostrar_vista_eliminar_pf,
-                    color_bg=COLOR_PELIGRO, color_fg="white").pack(pady=5)
-
-        tk.Frame(frame, bg="#BDBDBD", height=1).pack(fill="x", pady=12)
-        self._boton(frame, "← Volver al Menú Principal",
-                    self.mostrar_menu_principal, ancho=30).pack(pady=5)
-
-    def _seleccionar_pf_y_hacer(self, callback):
-        self.limpiar_pantalla()
-        self._titulo(self.container, "Seleccionar Producto Final")
-
-        fb = tk.Frame(self.container, bg=COLOR_BG)
-        fb.pack(fill="x", padx=20, pady=10)
-        tk.Label(fb, text="🔍  Buscar Producto Final:", font=FONT_PEQUEÑA, bg=COLOR_BG).pack(anchor="w")
-        combo = self._crear_combobox_pf(fb, lambda e: None)
-        combo.pack(fill="x", pady=4)
-
-        def _hacer():
-            nombre = combo.get()
-            if not nombre or nombre not in self.mapa_productos_finales:
-                messagebox.showerror("Error", "Selecciona un Producto Final válido.")
-                return
-            callback(self.mapa_productos_finales[nombre])
-
-        fbot = tk.Frame(self.container, bg=COLOR_BG)
-        fbot.pack(fill="x", padx=20, pady=10)
-        self._boton(fbot, "← Volver", self.mostrar_menu_producto_final, ancho=14).pack(side="left")
-        self._boton(fbot, "✓ Seleccionar", _hacer,
-                    color_bg=COLOR_ACENTO, color_fg="white", ancho=16).pack(side="right")
-
-    # ── Formulario crear/editar ProductoFinal ─────────────────────────────────
-
-    def mostrar_formulario_producto_final(self, modo: str, pf_id: int | None = None):
-        self.limpiar_pantalla()
-        self._pf_receta: list[dict] = []
-        self._pf_costos: list[dict] = []
-        self._critico_var = tk.BooleanVar(value=False)
-
-        titulo = "Nuevo Producto Final" if modo == "crear" else "Editar Producto Final"
-        self._titulo(self.container, titulo)
-
-        self._barra_botones(self.mostrar_menu_producto_final,
-                            lambda: self._guardar_producto_final(modo, pf_id),
-                            "💾  Guardar Producto Final")
-        self._separador(self.container)
-
-        outer, frame_form, _ = self._crear_scroll_frame(self.container)
-        outer.pack(fill="both", expand=True, padx=10)
-
-        # ── Sección 1: Datos generales ──
-        lf1 = tk.LabelFrame(frame_form, text=" Datos Generales ",
-                            bg=COLOR_BG, font=FONT_NORMAL, fg=COLOR_TEXTO)
-        lf1.pack(fill="x", padx=5, pady=5)
-
-        self._pf_entries: dict[str, tk.Entry] = {}
-        campos_pf = [
-            ("nombre",        "Nombre del producto:"),
-            ("descripcion",   "Descripción (opcional):"),
-            ("porcion_g",     "Porción (g, ej: 25):"),
-            ("gramaje_g",     "Gramaje empaque (g, ej: 200):"),
-            ("humedad_final", "Humedad final (%, ej: 4.0):"),
-        ]
-        defaults = {"porcion_g": "25", "gramaje_g": "200", "humedad_final": "0"}
-        for key, label in campos_pf:
-            row = tk.Frame(lf1, bg=COLOR_BG)
-            row.pack(fill="x", padx=8, pady=3)
-            tk.Label(row, text=label, font=FONT_NORMAL, bg=COLOR_BG,
-                     width=28, anchor="w").pack(side="left")
-            e = tk.Entry(row, font=FONT_NORMAL, relief="solid", bd=1)
-            if key in defaults:
-                e.insert(0, defaults[key])
-            e.pack(side="right", expand=True, fill="x")
-            self._pf_entries[key] = e
-
-        row_crit = tk.Frame(lf1, bg=COLOR_BG)
-        row_crit.pack(fill="x", padx=8, pady=3)
-        tk.Checkbutton(row_crit, text="  Crítico",
-                       variable=self._critico_var,
-                       font=FONT_BOLD, bg=COLOR_BG, fg=COLOR_TEXTO,
-                       selectcolor="#FFFFFF", activebackground=COLOR_BG).pack(side="left")
-        tk.Label(row_crit, text="(aplica sellos de advertencia)",
-                 font=FONT_PEQUEÑA, bg=COLOR_BG, fg="#757575").pack(side="left", padx=8)
-
-        # ── Sección 2: Composición de SubProductos ──
-        lf2 = tk.LabelFrame(frame_form, text=" Composición de SubProductos (% en peso) ",
-                            bg=COLOR_BG, font=FONT_NORMAL, fg=COLOR_TEXTO)
-        lf2.pack(fill="x", padx=5, pady=5)
-
-        fa2 = tk.Frame(lf2, bg=COLOR_BG)
-        fa2.pack(fill="x", padx=8, pady=(8, 4))
-        tk.Label(fa2, text="SubProducto:", font=FONT_PEQUEÑA, bg=COLOR_BG).pack(side="left")
-        self._pf_combo_sp = self._crear_combobox_sp(fa2, lambda e: None)
-        self._pf_combo_sp.pack(side="left", padx=4)
-        tk.Label(fa2, text="%:", font=FONT_PEQUEÑA, bg=COLOR_BG).pack(side="left")
-        self._pf_e_pct_sp = tk.Entry(fa2, font=FONT_NORMAL, width=8, relief="solid", bd=1)
-        self._pf_e_pct_sp.pack(side="left", padx=4)
-        self._boton(fa2, "➕", self._pf_agregar_sp,
-                    color_bg=COLOR_ACENTO, color_fg="white", ancho=4).pack(side="left")
-
-        ft2 = tk.Frame(lf2, bg=COLOR_BG)
-        ft2.pack(fill="x", padx=8, pady=2)
-        self._pf_tree_receta = ttk.Treeview(ft2,
-            columns=("subproducto", "pct"), show="headings", height=4)
-        self._pf_tree_receta.heading("subproducto", text="SubProducto")
-        self._pf_tree_receta.heading("pct", text="%")
-        self._pf_tree_receta.column("subproducto", width=360)
-        self._pf_tree_receta.column("pct", width=80, anchor="center")
-        sb2 = ttk.Scrollbar(ft2, orient="vertical", command=self._pf_tree_receta.yview)
-        self._pf_tree_receta.configure(yscrollcommand=sb2.set)
-        self._pf_tree_receta.pack(side="left", fill="x", expand=True)
-        sb2.pack(side="right", fill="y")
-
-        fc2 = tk.Frame(lf2, bg=COLOR_BG)
-        fc2.pack(fill="x", padx=8, pady=(2, 8))
-        self._pf_lbl_total = tk.Label(fc2, text="Total: 0.00%",
-                                      font=FONT_NORMAL, bg=COLOR_BG, fg=COLOR_PELIGRO)
-        self._pf_lbl_total.pack(side="left")
-        self._boton(fc2, "🗑️ Quitar fila", self._pf_quitar_sp,
-                    color_bg=COLOR_PELIGRO, color_fg="white", ancho=14).pack(side="right")
-
-        # ── Sección 3: Costos operativos del PT ──
-        lf3 = tk.LabelFrame(frame_form, text=" Costos Operativos del PT (cascada secuencial) ",
-                            bg=COLOR_BG, font=FONT_NORMAL, fg=COLOR_TEXTO)
-        lf3.pack(fill="x", padx=5, pady=5)
-
-        fa3 = tk.Frame(lf3, bg=COLOR_BG)
-        fa3.pack(fill="x", padx=8, pady=(8, 4))
-        tk.Label(fa3, text="Nombre:", font=FONT_PEQUEÑA, bg=COLOR_BG).pack(side="left")
-        self._pf_e_cnombre = tk.Entry(fa3, font=FONT_NORMAL, width=14, relief="solid", bd=1)
-        self._pf_e_cnombre.pack(side="left", padx=3)
-        tk.Label(fa3, text="Tipo:", font=FONT_PEQUEÑA, bg=COLOR_BG).pack(side="left")
-        self._pf_cb_ctipo = ttk.Combobox(fa3, values=["porcentual", "fijo"],
-                                          state="readonly", width=10, font=FONT_NORMAL)
-        self._pf_cb_ctipo.set("porcentual")
-        self._pf_cb_ctipo.pack(side="left", padx=3)
-        tk.Label(fa3, text="Valor:", font=FONT_PEQUEÑA, bg=COLOR_BG).pack(side="left")
-        self._pf_e_cvalor = tk.Entry(fa3, font=FONT_NORMAL, width=8, relief="solid", bd=1)
-        self._pf_e_cvalor.pack(side="left", padx=3)
-        tk.Label(fa3, text="(% o $/kg)", font=FONT_PEQUEÑA, bg=COLOR_BG,
-                 fg="#757575").pack(side="left", padx=2)
-        self._boton(fa3, "➕", self._pf_agregar_costo,
-                    color_bg=COLOR_ACENTO, color_fg="white", ancho=4).pack(side="left", padx=4)
-
-        ft3 = tk.Frame(lf3, bg=COLOR_BG)
-        ft3.pack(fill="x", padx=8, pady=2)
-        self._pf_tree_costos = ttk.Treeview(ft3,
-            columns=("orden", "nombre", "tipo", "valor"), show="headings", height=4)
-        self._pf_tree_costos.heading("orden", text="#")
-        self._pf_tree_costos.heading("nombre", text="Proceso")
-        self._pf_tree_costos.heading("tipo", text="Tipo")
-        self._pf_tree_costos.heading("valor", text="Valor")
-        self._pf_tree_costos.column("orden", width=30, anchor="center")
-        self._pf_tree_costos.column("nombre", width=200)
-        self._pf_tree_costos.column("tipo", width=100, anchor="center")
-        self._pf_tree_costos.column("valor", width=100, anchor="center")
-        sb3 = ttk.Scrollbar(ft3, orient="vertical", command=self._pf_tree_costos.yview)
-        self._pf_tree_costos.configure(yscrollcommand=sb3.set)
-        self._pf_tree_costos.pack(side="left", fill="x", expand=True)
-        sb3.pack(side="right", fill="y")
-
-        fc3 = tk.Frame(lf3, bg=COLOR_BG)
-        fc3.pack(fill="x", padx=8, pady=(2, 8))
-        self._boton(fc3, "🗑️ Quitar paso", self._pf_quitar_costo,
-                    color_bg=COLOR_PELIGRO, color_fg="white", ancho=14).pack(side="right")
-
-        if modo == "editar" and pf_id:
-            self._pf_cargar_existente(pf_id)
-
-    # ── Helpers del formulario PF ─────────────────────────────────────────────
-
-    def _pf_refrescar_tree_receta(self):
-        for item in self._pf_tree_receta.get_children():
-            self._pf_tree_receta.delete(item)
-        total = 0.0
-        for fila in self._pf_receta:
-            self._pf_tree_receta.insert("", "end",
-                values=(fila["nombre"], f"{fila['pct']:.4f}"))
-            total += fila["pct"]
-        ok = abs(total - 100.0) < 0.01
-        self._pf_lbl_total.config(
-            text=f"Total: {total:.4f}%  {'✅' if ok else '⚠️ debe ser 100.00%'}",
-            fg=COLOR_EXITO if ok else COLOR_PELIGRO)
-
-    def _pf_agregar_sp(self):
-        nombre = self._pf_combo_sp.get().strip()
-        pct_str = self._pf_e_pct_sp.get().strip().replace(",", ".")
-        if not nombre or nombre not in self.mapa_subproductos:
-            messagebox.showerror("Error", "Selecciona un SubProducto válido de la lista.")
+    def _prod_agregar_prod(self):
+        nombre = self._prod_combo_prod.get().strip()
+        pct_str = self._prod_e_pct_prod.get().strip().replace(",", ".")
+        if not nombre or nombre not in self.mapa_productos:
+            messagebox.showerror("Error", "Selecciona un Producto válido de la lista.")
             return
         try:
             pct = float(pct_str)
@@ -1163,40 +928,40 @@ class AppNutricion(tk.Tk):
         except ValueError:
             messagebox.showerror("Error", "Ingresa un porcentaje válido (número > 0).")
             return
-        for fila in self._pf_receta:
-            if fila["sp_id"] == self.mapa_subproductos[nombre]:
+        for fila in self._prod_receta_prod:
+            if fila["prod_id"] == self.mapa_productos[nombre]:
                 fila["pct"] = pct
-                self._pf_refrescar_tree_receta()
-                self._pf_e_pct_sp.delete(0, tk.END)
+                self._prod_refrescar_tree_receta_prod()
+                self._prod_e_pct_prod.delete(0, tk.END)
                 return
-        self._pf_receta.append({"sp_id": self.mapa_subproductos[nombre],
-                                 "nombre": nombre, "pct": pct})
-        self._pf_refrescar_tree_receta()
-        self._pf_combo_sp.set("")
-        self._pf_e_pct_sp.delete(0, tk.END)
+        self._prod_receta_prod.append({"prod_id": self.mapa_productos[nombre],
+                                        "nombre": nombre, "pct": pct})
+        self._prod_refrescar_tree_receta_prod()
+        self._prod_combo_prod.set("")
+        self._prod_e_pct_prod.delete(0, tk.END)
 
-    def _pf_quitar_sp(self):
-        sel = self._pf_tree_receta.selection()
+    def _prod_quitar_prod(self):
+        sel = self._prod_tree_receta_prod.selection()
         if not sel:
             messagebox.showerror("Sin selección", "Selecciona una fila para quitar.")
             return
-        nombre = self._pf_tree_receta.item(sel[0])["values"][0]
-        self._pf_receta = [f for f in self._pf_receta if f["nombre"] != nombre]
-        self._pf_refrescar_tree_receta()
+        nombre = self._prod_tree_receta_prod.item(sel[0])["values"][0]
+        self._prod_receta_prod = [f for f in self._prod_receta_prod if f["nombre"] != nombre]
+        self._prod_refrescar_tree_receta_prod()
 
-    def _pf_refrescar_tree_costos(self):
-        for item in self._pf_tree_costos.get_children():
-            self._pf_tree_costos.delete(item)
-        for i, fila in enumerate(self._pf_costos, 1):
+    def _prod_refrescar_tree_costos(self):
+        for item in self._prod_tree_costos.get_children():
+            self._prod_tree_costos.delete(item)
+        for i, fila in enumerate(self._prod_costos, 1):
             vd = (f"{fila['valor']:.4f}%" if fila["tipo"] == "porcentual"
                   else f"${fila['valor']:,.2f}")
-            self._pf_tree_costos.insert("", "end",
+            self._prod_tree_costos.insert("", "end",
                 values=(i, fila["nombre"], fila["tipo"], vd))
 
-    def _pf_agregar_costo(self):
-        nombre = self._pf_e_cnombre.get().strip()
-        tipo = self._pf_cb_ctipo.get()
-        valor_str = self._pf_e_cvalor.get().strip().replace(",", ".")
+    def _prod_agregar_costo(self):
+        nombre = self._prod_e_cnombre.get().strip()
+        tipo = self._prod_cb_ctipo.get()
+        valor_str = self._prod_e_cvalor.get().strip().replace(",", ".")
         if not nombre:
             messagebox.showerror("Error", "Ingresa un nombre para el proceso.")
             return
@@ -1207,221 +972,267 @@ class AppNutricion(tk.Tk):
         except ValueError:
             messagebox.showerror("Error", "Ingresa un valor numérico válido (>= 0).")
             return
-        self._pf_costos.append({"nombre": nombre, "tipo": tipo, "valor": valor})
-        self._pf_refrescar_tree_costos()
-        self._pf_e_cnombre.delete(0, tk.END)
-        self._pf_e_cvalor.delete(0, tk.END)
+        self._prod_costos.append({"nombre": nombre, "tipo": tipo, "valor": valor})
+        self._prod_refrescar_tree_costos()
+        self._prod_e_cnombre.delete(0, tk.END)
+        self._prod_e_cvalor.delete(0, tk.END)
 
-    def _pf_quitar_costo(self):
-        sel = self._pf_tree_costos.selection()
+    def _prod_quitar_costo(self):
+        sel = self._prod_tree_costos.selection()
         if not sel:
             messagebox.showerror("Sin selección", "Selecciona un paso para quitar.")
             return
-        orden = int(self._pf_tree_costos.item(sel[0])["values"][0]) - 1
-        self._pf_costos.pop(orden)
-        self._pf_refrescar_tree_costos()
+        orden = int(self._prod_tree_costos.item(sel[0])["values"][0]) - 1
+        self._prod_costos.pop(orden)
+        self._prod_refrescar_tree_costos()
 
-    def _pf_cargar_existente(self, pf_id: int):
+    def _prod_cargar_existente(self, prod_id):
         with Session(engine) as s:
-            pf = s.get(ProductoFinal, pf_id, options=[
-                selectinload(ProductoFinal.receta_subproductos)
-                    .selectinload(ProductoFinalSubProducto.subproducto),
-                selectinload(ProductoFinal.costos_operativos),
-            ])
-            if pf is None:
+            p = s.get(Producto, prod_id, options=self._selectinload_completo())
+            if p is None:
                 return
-            self._pf_entries["nombre"].insert(0, pf.nombre)
-            self._pf_entries["descripcion"].insert(0, pf.descripcion or "")
-            self._critico_var.set(pf.critico)
-            for k, v in [("porcion_g", pf.porcion_g), ("gramaje_g", pf.gramaje_g)]:
-                self._pf_entries[k].delete(0, tk.END)
-                self._pf_entries[k].insert(0, str(v))
-            self._pf_entries["humedad_final"].delete(0, tk.END)
-            self._pf_entries["humedad_final"].insert(0, str(round(pf.humedad_final * 100.0, 6)))
-            for rel in pf.receta_subproductos:
-                self._pf_receta.append({
-                    "sp_id":  rel.subproducto_id,
-                    "nombre": rel.subproducto.nombre,
+            self._prod_entries["nombre"].insert(0, p.nombre)
+            self._prod_entries["descripcion"].insert(0, p.descripcion or "")
+            self._prod_entries["humedad_final"].insert(0, str(round(p.humedad_final * 100.0, 6)))
+            self._critico_var.set(p.critico)
+            if "porcion_g" in self._prod_entries:
+                self._prod_entries["porcion_g"].delete(0, tk.END)
+                self._prod_entries["porcion_g"].insert(0, str(p.porcion_g))
+            if "gramaje_g" in self._prod_entries:
+                self._prod_entries["gramaje_g"].delete(0, tk.END)
+                self._prod_entries["gramaje_g"].insert(0, str(p.gramaje_g))
+            if "meses_caducidad" in self._prod_entries:
+                self._prod_entries["meses_caducidad"].delete(0, tk.END)
+                if p.meses_caducidad is not None:
+                    self._prod_entries["meses_caducidad"].insert(0, str(p.meses_caducidad))
+            for rel in p.receta_ingredientes:
+                self._prod_receta_ing.append({
+                    "ing_id": rel.ingrediente_id,
+                    "nombre": rel.ingrediente.id_unico,
                     "pct":    round(rel.proporcion * 100.0, 6),
                 })
-            for co in pf.costos_operativos:
-                self._pf_costos.append({
-                    "nombre": co.nombre, "tipo": co.tipo,
+            for comp in p.receta_productos:
+                self._prod_receta_prod.append({
+                    "prod_id": comp.hijo_id,
+                    "nombre":  comp.hijo.nombre,
+                    "pct":     round(comp.proporcion * 100.0, 6),
+                })
+            for co in p.costos_operativos:
+                self._prod_costos.append({
+                    "nombre": co.nombre,
+                    "tipo":   co.tipo,
                     "valor":  round(co.valor * 100.0, 6) if co.tipo == "porcentual" else co.valor,
                 })
-        self._pf_refrescar_tree_receta()
-        self._pf_refrescar_tree_costos()
+        self._prod_refrescar_tree_receta_ing()
+        self._prod_refrescar_tree_receta_prod()
+        self._prod_refrescar_tree_costos()
 
-    def _guardar_producto_final(self, modo: str, pf_id: int | None):
+    def _guardar_producto(self, modo, tipo_prod, prod_id):
         try:
-            nombre  = self._pf_entries["nombre"].get().strip()
-            desc    = self._pf_entries["descripcion"].get().strip()
-            p_str   = self._pf_entries["porcion_g"].get().strip().replace(",", ".")
-            g_str   = self._pf_entries["gramaje_g"].get().strip().replace(",", ".")
-            h_str   = self._pf_entries["humedad_final"].get().strip().replace(",", ".")
+            nombre = self._prod_entries["nombre"].get().strip()
+            desc = self._prod_entries["descripcion"].get().strip()
+            h_str = self._prod_entries["humedad_final"].get().strip().replace(",", ".")
             critico = self._critico_var.get()
 
             if not nombre:
-                raise ValueError("El nombre del Producto Final no puede estar vacío.")
-            if not self._pf_receta:
-                raise ValueError("Agrega al menos un SubProducto a la composición.")
+                raise ValueError("El nombre del Producto no puede estar vacío.")
+            if not self._prod_receta_ing and not self._prod_receta_prod:
+                raise ValueError("Agrega al menos un ingrediente o producto a la receta.")
 
-            porcion_g  = float(p_str) if p_str else 25.0
-            gramaje_g  = float(g_str) if g_str else 200.0
-            humedad_f  = float(h_str) / 100.0 if h_str else 0.0
-
-            total_pct = sum(f["pct"] for f in self._pf_receta)
+            humedad_f = float(h_str) / 100.0 if h_str else 0.0
+            total_pct = (sum(f["pct"] for f in self._prod_receta_ing)
+                        + sum(f["pct"] for f in self._prod_receta_prod))
             if abs(total_pct - 100.0) > 0.01:
                 raise ValueError(
-                    f"Las proporciones deben sumar 100%.\nTotal actual: {total_pct:.4f}%")
+                    f"Los porcentajes deben sumar 100%.\nTotal actual: {total_pct:.4f}%")
+
+            es_pf = (tipo_prod == "producto_final")
+            porcion_g = 25.0
+            gramaje_g = 200.0
+            meses_cad = None
+            if es_pf:
+                p_str = self._prod_entries.get("porcion_g")
+                g_str = self._prod_entries.get("gramaje_g")
+                mc_str = self._prod_entries.get("meses_caducidad")
+                if p_str:
+                    porcion_g = float(p_str.get().strip().replace(",", ".") or "25")
+                if g_str:
+                    gramaje_g = float(g_str.get().strip().replace(",", ".") or "200")
+                if mc_str:
+                    mc_val = mc_str.get().strip()
+                    meses_cad = int(mc_val) if mc_val else None
 
             with Session(engine) as s:
                 if modo == "crear":
-                    pf = ProductoFinal(nombre=nombre, descripcion=desc,
-                                       porcion_g=porcion_g, gramaje_g=gramaje_g,
-                                       humedad_final=humedad_f, critico=critico)
-                    s.add(pf)
+                    p = Producto(nombre=nombre, descripcion=desc, tipo=tipo_prod,
+                                humedad_final=humedad_f, critico=critico,
+                                porcion_g=porcion_g, gramaje_g=gramaje_g,
+                                meses_caducidad=meses_cad)
+                    s.add(p)
                     s.flush()
                 else:
-                    pf = s.get(ProductoFinal, pf_id)
-                    pf.nombre = nombre; pf.descripcion = desc
-                    pf.porcion_g = porcion_g; pf.gramaje_g = gramaje_g
-                    pf.humedad_final = humedad_f; pf.critico = critico
-                    pf.receta_subproductos = []
-                    pf.costos_operativos = []
+                    p = s.get(Producto, prod_id)
+                    p.nombre = nombre
+                    p.descripcion = desc
+                    p.humedad_final = humedad_f
+                    p.critico = critico
+                    p.porcion_g = porcion_g
+                    p.gramaje_g = gramaje_g
+                    p.meses_caducidad = meses_cad
+                    p.receta_ingredientes = []
+                    p.receta_productos = []
+                    p.costos_operativos = []
                     s.flush()
 
-                for fila in self._pf_receta:
-                    s.add(ProductoFinalSubProducto(
-                        productofinal_id=pf.id,
-                        subproducto_id=fila["sp_id"],
+                for fila in self._prod_receta_ing:
+                    s.add(RecetaIngrediente(
+                        producto_id=p.id,
+                        ingrediente_id=fila["ing_id"],
                         proporcion=fila["pct"] / 100.0,
                     ))
-                for i, fila in enumerate(self._pf_costos, 1):
-                    valor_db = fila["valor"] / 100.0 if fila["tipo"] == "porcentual" else fila["valor"]
-                    s.add(CostoOperativoPT(
-                        productofinal_id=pf.id, nombre=fila["nombre"],
+                for fila in self._prod_receta_prod:
+                    s.add(RecetaProducto(
+                        padre_id=p.id,
+                        hijo_id=fila["prod_id"],
+                        proporcion=fila["pct"] / 100.0,
+                    ))
+                for i, fila in enumerate(self._prod_costos, 1):
+                    valor_db = (fila["valor"] / 100.0 if fila["tipo"] == "porcentual"
+                                else fila["valor"])
+                    s.add(CostoOperativo(
+                        producto_id=p.id, nombre=fila["nombre"],
                         tipo=fila["tipo"], valor=valor_db, orden=i,
                     ))
                 s.flush()
 
-                pf_l = s.get(ProductoFinal, pf.id, options=[
-                    selectinload(ProductoFinal.receta_subproductos)
-                        .selectinload(ProductoFinalSubProducto.subproducto)
-                        .selectinload(SubProducto.receta_ingredientes)
-                        .selectinload(SubProductoIngrediente.ingrediente),
-                    selectinload(ProductoFinal.receta_subproductos)
-                        .selectinload(ProductoFinalSubProducto.subproducto)
-                        .selectinload(SubProducto.costos_operativos),
-                    selectinload(ProductoFinal.costos_operativos),
-                ])
-                tabla_100g   = pf_l.tabla_nutricional_100g()
-                tabla_p      = pf_l.tabla_nutricional_porcion()
-                merma_pct    = pf_l.merma() * 100.0
-                factor       = pf_l.factor_concentracion()
-                costo_kg     = pf_l.costo_final_kg()
-                nombre_pf    = pf_l.nombre
-                porcion_final = pf_l.porcion_g
-                critico_pf   = pf_l.critico
+                p_l = s.get(Producto, p.id, options=self._selectinload_completo())
+                tabla_100g   = p_l.tabla_nutricional_100g()
+                tabla_p      = p_l.tabla_nutricional_porcion()
+                merma_pct    = p_l.merma() * 100.0
+                factor       = p_l.factor_concentracion()
+                costo_kg     = p_l.costo_final_kg()
+                nombre_p     = p_l.nombre
+                porcion_final = p_l.porcion_g
+                critico_p    = p_l.critico
+                critico_auto = p_l.critico_calculado()
+                humedad_pct  = p_l.humedad_final * 100.0
+                micros       = p_l.tabla_micronutrientes_filtrada()
+
+                # Caducidad
+                cad_info = None
+                fecha_est = p_l.fecha_caducidad_estimada()
+                prox = p_l.ingredientes_proximos_a_caducar(5)
+                if fecha_est or prox:
+                    cad_info = {
+                        "fecha_estimada": str(fecha_est) if fecha_est else None,
+                        "proximos": [(ing.nombre, str(f)) for ing, f in prox],
+                    }
 
                 s.commit()
 
-            messagebox.showinfo("✅ Guardado", f"Producto Final '{nombre_pf}' guardado correctamente.")
+            messagebox.showinfo("✅ Guardado", f"Producto '{nombre_p}' guardado correctamente.")
             self._mostrar_toplevel_nutricional(
-                f"Tabla Nutricional — {nombre_pf}",
-                nombre_pf, tabla_100g, tabla_p,
+                f"Tabla Nutricional — {nombre_p}",
+                nombre_p, tabla_100g, tabla_p,
                 porcion_final, merma_pct, factor, costo_kg,
-                critico=critico_pf)
-            self.mostrar_menu_producto_final()
+                critico=critico_p, critico_auto=critico_auto,
+                humedad_final_pct=humedad_pct, micronutrientes=micros,
+                caducidad_info=cad_info)
+            self.mostrar_menu_productos()
 
         except ValueError as exc:
             messagebox.showerror("Error de validación", str(exc))
         except IntegrityError:
-            messagebox.showerror("Duplicado", "Ya existe un Producto Final con ese nombre.")
+            messagebox.showerror("Duplicado", "Ya existe un Producto con ese nombre.")
         except Exception as exc:
             messagebox.showerror("Error inesperado", str(exc))
 
-    def _ver_tabla_pf(self, pf_id: int):
+    def _ver_tabla_prod(self, prod_id):
         try:
             with Session(engine) as s:
-                pf = s.get(ProductoFinal, pf_id, options=[
-                    selectinload(ProductoFinal.receta_subproductos)
-                        .selectinload(ProductoFinalSubProducto.subproducto)
-                        .selectinload(SubProducto.receta_ingredientes)
-                        .selectinload(SubProductoIngrediente.ingrediente),
-                    selectinload(ProductoFinal.receta_subproductos)
-                        .selectinload(ProductoFinalSubProducto.subproducto)
-                        .selectinload(SubProducto.costos_operativos),
-                    selectinload(ProductoFinal.costos_operativos),
-                ])
-                if pf is None:
-                    messagebox.showerror("Error", "Producto Final no encontrado.")
+                p = s.get(Producto, prod_id, options=self._selectinload_completo())
+                if p is None:
+                    messagebox.showerror("Error", "Producto no encontrado.")
                     return
-                tabla_100g = pf.tabla_nutricional_100g()
-                tabla_p    = pf.tabla_nutricional_porcion()
-                merma_pct  = pf.merma() * 100.0
-                factor     = pf.factor_concentracion()
-                costo      = pf.costo_final_kg()
-                nombre     = pf.nombre
-                porcion_g  = pf.porcion_g
-                critico    = pf.critico
+                tabla_100g   = p.tabla_nutricional_100g()
+                tabla_p      = p.tabla_nutricional_porcion()
+                merma_pct    = p.merma() * 100.0
+                factor       = p.factor_concentracion()
+                costo        = p.costo_final_kg()
+                nombre       = p.nombre
+                porcion_g    = p.porcion_g
+                critico      = p.critico
+                critico_auto = p.critico_calculado()
+                humedad_pct  = p.humedad_final * 100.0
+                micros       = p.tabla_micronutrientes_filtrada()
+
+                fecha_est = p.fecha_caducidad_estimada()
+                prox = p.ingredientes_proximos_a_caducar(5)
+                cad_info = None
+                if fecha_est or prox:
+                    cad_info = {
+                        "fecha_estimada": str(fecha_est) if fecha_est else None,
+                        "proximos": [(ing.nombre, str(f)) for ing, f in prox],
+                    }
 
             self._mostrar_toplevel_nutricional(
                 f"Tabla Nutricional — {nombre}",
                 nombre, tabla_100g, tabla_p, porcion_g, merma_pct, factor, costo,
-                critico=critico)
-            self.mostrar_menu_producto_final()
+                critico=critico, critico_auto=critico_auto,
+                humedad_final_pct=humedad_pct, micronutrientes=micros,
+                caducidad_info=cad_info)
+            self.mostrar_menu_productos()
         except Exception as exc:
             messagebox.showerror("Error", str(exc))
 
-    def mostrar_vista_eliminar_pf(self):
+    def mostrar_vista_eliminar_prod(self):
         self.limpiar_pantalla()
-        self._titulo(self.container, "Eliminar Producto Final")
+        self._titulo(self.container, "Eliminar Producto")
 
         fb = tk.Frame(self.container, bg=COLOR_BG)
         fb.pack(fill="x", padx=20, pady=(0, 6))
-        tk.Label(fb, text="🔍  Buscar Producto Final a eliminar:",
+        tk.Label(fb, text="🔍  Buscar Producto a eliminar:",
                  font=FONT_PEQUEÑA, bg=COLOR_BG).pack(anchor="w")
-        self._pf_combo_elim = self._crear_combobox_pf(fb, self._pf_seleccionar_elim)
-        self._pf_combo_elim.pack(fill="x", pady=4)
+        self._prod_combo_elim = self._crear_combobox_producto(fb, self._prod_seleccionar_elim)
+        self._prod_combo_elim.pack(fill="x", pady=4)
 
         fbot = tk.Frame(self.container, bg=COLOR_BG)
         fbot.pack(fill="x", padx=20, pady=(4, 0))
-        self._boton(fbot, "← Volver", self.mostrar_menu_producto_final, ancho=14).pack(side="left")
-        self._boton(fbot, "🗑️  Eliminar", self._pf_eliminar,
+        self._boton(fbot, "← Volver", self.mostrar_menu_productos, ancho=14).pack(side="left")
+        self._boton(fbot, "🗑️  Eliminar", self._prod_eliminar,
                     color_bg=COLOR_PELIGRO, color_fg="white", ancho=16).pack(side="right")
         self._separador(self.container)
 
-        self._pf_lbl_adv = tk.Label(
-            self.container, text="Selecciona un Producto Final para eliminarlo.",
+        self._prod_lbl_adv = tk.Label(
+            self.container, text="Selecciona un Producto para eliminarlo.",
             fg="#757575", font=FONT_NORMAL, bg=COLOR_BG, wraplength=480, justify="center")
-        self._pf_lbl_adv.pack(pady=30)
-        self._pf_id_elim: int | None = None
+        self._prod_lbl_adv.pack(pady=30)
+        self._prod_id_elim: int | None = None
 
-    def _pf_seleccionar_elim(self, event=None):
-        nombre = self._pf_combo_elim.get()
-        if not nombre or nombre not in self.mapa_productos_finales:
+    def _prod_seleccionar_elim(self, event=None):
+        nombre = self._prod_combo_elim.get()
+        if not nombre or nombre not in self.mapa_productos:
             return
-        self._pf_id_elim = self.mapa_productos_finales[nombre]
-        self._pf_lbl_adv.config(
-            text=f"⚠️  ¿Eliminar Producto Final?\n\n«{nombre}»\n\nEsta acción no se puede deshacer.",
+        self._prod_id_elim = self.mapa_productos[nombre]
+        self._prod_lbl_adv.config(
+            text=f"⚠️  ¿Eliminar Producto?\n\n«{nombre}»\n\nEsta acción no se puede deshacer.",
             fg=COLOR_PELIGRO, font=("Segoe UI", 10, "bold"))
 
-    def _pf_eliminar(self):
-        if not self._pf_id_elim:
-            messagebox.showerror("Sin selección", "Selecciona un Producto Final primero.")
+    def _prod_eliminar(self):
+        if not self._prod_id_elim:
+            messagebox.showerror("Sin selección", "Selecciona un Producto primero.")
             return
         if not messagebox.askyesno("Confirmar",
-                                   "¿Eliminar este Producto Final?\n\nEsta acción es irreversible."):
+                                   "¿Eliminar este Producto?\n\nEsta acción es irreversible."):
             return
         try:
             with Session(engine) as s:
-                pf = s.get(ProductoFinal, self._pf_id_elim)
-                if pf:
-                    s.delete(pf)
+                p = s.get(Producto, self._prod_id_elim)
+                if p:
+                    s.delete(p)
                     s.commit()
-            messagebox.showinfo("✅ Eliminado", "Producto Final eliminado correctamente.")
-            self.mostrar_menu_producto_final()
+            messagebox.showinfo("✅ Eliminado", "Producto eliminado correctamente.")
+            self.mostrar_menu_productos()
         except Exception as exc:
             messagebox.showerror("Error inesperado", str(exc))
 
@@ -1455,7 +1266,7 @@ class AppNutricion(tk.Tk):
 
         tk.Label(self.container,
                  text="💡  Las normativas se calculan automáticamente al ver la tabla\n"
-                      "nutricional de un SubProducto o Producto Final.\n\n"
+                      "nutricional de un Producto.\n\n"
                       "Para agregar una nueva normativa, contacte al desarrollador.",
                  font=FONT_PEQUEÑA, bg=COLOR_BG, fg="#757575",
                  justify="center", wraplength=500).pack(pady=16)

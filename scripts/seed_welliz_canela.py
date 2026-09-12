@@ -1,6 +1,7 @@
 """
-Script de seed: inserta todos los ingredientes y subproductos del Excel
-"Cereal Welliz Canela v1 p4 - 26-08-26 - Estuche Normal.xlsx"
+Script de seed: inserta todos los ingredientes, catálogo de micronutrientes
+y productos del Excel "Cereal Welliz Canela v1 p4 - 26-08-26 - Estuche Normal.xlsx"
+usando la arquitectura unificada Producto.
 
 Ejecutar desde la raíz del proyecto:
     /home/miauuu/py12/bin/python scripts/seed_welliz_canela.py
@@ -9,14 +10,19 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 from src.database import engine, Base
 from src.models.ingrediente import Ingrediente
-from src.models.subproducto import (
-    SubProducto, SubProductoIngrediente, CostoOperativo
+from src.models.producto import (
+    Producto,
+    RecetaIngrediente,
+    RecetaProducto,
+    CostoOperativo,
 )
-from src.models.producto_final import (
-    ProductoFinal, ProductoFinalSubProducto, CostoOperativoPT
+from src.models.micronutriente import (
+    Micronutriente,
+    ProductoMicronutriente,
+    DDR_RSA_CHILE,
 )
 
 # Asegurar que todas las tablas existan
@@ -264,7 +270,7 @@ INGREDIENTES = [
 ]
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SUBPRODUCTOS
+# SUBPRODUCTOS (Productos intermedios)
 # ══════════════════════════════════════════════════════════════════════════════
 
 # Recetas: { nombre_ingrediente: % }
@@ -323,7 +329,7 @@ SUBPRODUCTOS = [
 ]
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PT GRANEL
+# PRODUCTO FINAL (PT Granel)
 # ══════════════════════════════════════════════════════════════════════════════
 
 PT_GRANEL = {
@@ -365,24 +371,32 @@ def main():
             ing_map[datos["nombre"]] = ing.id
             print(f"  [OK]   Ingrediente insertado: {datos['nombre']}")
 
-        # ── 2. Insertar SubProductos ──────────────────────────────────────────
+        # ── 2. Insertar catálogo de micronutrientes (DDR RSA Chile) ───────────
+        for datos in DDR_RSA_CHILE:
+            if not s.query(Micronutriente).filter_by(nombre=datos['nombre']).first():
+                s.add(Micronutriente(**datos))
+        s.flush()
+        print(f"  [OK]   Catálogo DDR RSA Chile verificado/insertado ({len(DDR_RSA_CHILE)} micronutrientes)")
+
+        # ── 3. Insertar SubProductos (Producto tipo='subproducto') ─────────────
         sp_map: dict[str, int] = {}    # nombre → id
         for sp_datos in SUBPRODUCTOS:
             if not sp_datos["receta"]:
                 print(f"  [SKIP] SubProducto sin receta: {sp_datos['nombre']}")
                 continue
 
-            existente = (s.query(SubProducto)
+            existente = (s.query(Producto)
                           .filter_by(nombre=sp_datos["nombre"])
                           .first())
             if existente:
-                print(f"  [SKIP] SubProducto ya existe: {sp_datos['nombre']}")
+                print(f"  [SKIP] Producto (subproducto) ya existe: {sp_datos['nombre']}")
                 sp_map[sp_datos["nombre"]] = existente.id
                 continue
 
-            sp = SubProducto(
+            sp = Producto(
                 nombre=sp_datos["nombre"],
                 descripcion=sp_datos["descripcion"],
+                tipo="subproducto",
                 humedad_final=sp_datos["humedad_final"],
                 critico=sp_datos["critico"],
             )
@@ -398,8 +412,8 @@ def main():
             for nombre_ing, pct in sp_datos["receta"].items():
                 ing_id = ing_map.get(nombre_ing)
                 assert ing_id, f"Ingrediente no encontrado: {nombre_ing}"
-                s.add(SubProductoIngrediente(
-                    subproducto_id=sp.id,
+                s.add(RecetaIngrediente(
+                    producto_id=sp.id,
                     ingrediente_id=ing_id,
                     proporcion=pct / 100.0,
                 ))
@@ -408,26 +422,27 @@ def main():
             for orden, (nombre_c, tipo, valor_ui) in enumerate(sp_datos["costos"], 1):
                 valor_db = valor_ui / 100.0 if tipo == "porcentual" else valor_ui
                 s.add(CostoOperativo(
-                    subproducto_id=sp.id,
+                    producto_id=sp.id,
                     nombre=nombre_c,
                     tipo=tipo,
                     valor=valor_db,
                     orden=orden,
                 ))
 
-            print(f"  [OK]   SubProducto insertado: {sp_datos['nombre']} "
+            print(f"  [OK]   Producto (subproducto) insertado: {sp_datos['nombre']} "
                   f"({len(sp_datos['receta'])} ingredientes, {len(sp_datos['costos'])} costos)")
 
-        # ── 3. Insertar PT Granel ─────────────────────────────────────────────
-        existente_pf = (s.query(ProductoFinal)
+        # ── 4. Insertar PT Granel (Producto tipo='producto_final') ────────────
+        existente_pf = (s.query(Producto)
                          .filter_by(nombre=PT_GRANEL["nombre"])
                          .first())
         if existente_pf:
-            print(f"  [SKIP] ProductoFinal ya existe: {PT_GRANEL['nombre']}")
+            print(f"  [SKIP] Producto final ya existe: {PT_GRANEL['nombre']}")
         else:
-            pf = ProductoFinal(
+            pf = Producto(
                 nombre=PT_GRANEL["nombre"],
                 descripcion=PT_GRANEL["descripcion"],
+                tipo="producto_final",
                 porcion_g=PT_GRANEL["porcion_g"],
                 gramaje_g=PT_GRANEL["gramaje_g"],
                 humedad_final=PT_GRANEL["humedad_final"],
@@ -442,56 +457,96 @@ def main():
             for nombre_sp, pct in PT_GRANEL["receta"].items():
                 sp_id = sp_map.get(nombre_sp)
                 assert sp_id, f"SubProducto no encontrado para PT: {nombre_sp}"
-                s.add(ProductoFinalSubProducto(
-                    productofinal_id=pf.id,
-                    subproducto_id=sp_id,
+                s.add(RecetaProducto(
+                    padre_id=pf.id,
+                    hijo_id=sp_id,
                     proporcion=pct / 100.0,
                 ))
 
-            print(f"  [OK]   ProductoFinal insertado: {PT_GRANEL['nombre']}")
+            for orden, (nombre_c, tipo, valor_ui) in enumerate(PT_GRANEL.get("costos", []), 1):
+                valor_db = valor_ui / 100.0 if tipo == "porcentual" else valor_ui
+                s.add(CostoOperativo(
+                    producto_id=pf.id,
+                    nombre=nombre_c,
+                    tipo=tipo,
+                    valor=valor_db,
+                    orden=orden,
+                ))
+
+            print(f"  [OK]   Producto final insertado: {PT_GRANEL['nombre']}")
 
         s.commit()
 
-    # ── 4. Verificar cálculo nutricional ──────────────────────────────────────
+    # ── 5. Verificar cálculo nutricional ──────────────────────────────────────
     print("\n=== VERIFICACIÓN — Tabla nutricional Extrusión (100g) ===")
-    from sqlalchemy.orm import selectinload
 
     with Session(engine) as s:
-        sp = (s.query(SubProducto)
+        sp = (s.query(Producto)
                .filter_by(nombre="Extrusión")
                .options(
-                   selectinload(SubProducto.receta_ingredientes)
-                       .selectinload(SubProductoIngrediente.ingrediente),
-                   selectinload(SubProducto.costos_operativos),
+                   selectinload(Producto.receta_ingredientes)
+                       .selectinload(RecetaIngrediente.ingrediente),
+                   selectinload(Producto.costos_operativos),
                )
                .first())
 
-        tabla = sp.tabla_nutricional()
-        merma = sp.merma() * 100
-        factor = sp.factor_concentracion()
-        costo  = sp.costo_final_kg()
+        if sp:
+            tabla = sp.tabla_nutricional_100g()
+            merma = sp.merma() * 100
+            factor = sp.factor_concentracion()
+            costo  = sp.costo_final_kg()
 
-        print(f"  Merma:  {merma:.6f}%  (esperado: 6.627650%)")
-        print(f"  Factor: {factor:.6f}  (esperado: 1.071073...)")
-        print(f"  Costo:  ${costo:,.4f} /kg  (esperado: $1,222.0847)")
-        print(f"  Energía: {tabla['energia_kcal']:.4f} kcal  (esperado: 383.6762)")
-        print(f"  Proteínas: {tabla['proteinas_g']:.4f} g  (esperado: 10.4934)")
-        print(f"  Sodio: {tabla['sodio_mg']:.4f} mg  (esperado: 16.3673)")
+            print(f"  Merma:  {merma:.6f}%  (esperado: 6.627650%)")
+            print(f"  Factor: {factor:.6f}  (esperado: 1.071073...)")
+            print(f"  Costo:  ${costo:,.4f} /kg  (esperado: $1,222.0847)")
+            print(f"  Energía: {tabla['energia_kcal']:.4f} kcal  (esperado: 383.6762)")
+            print(f"  Proteínas: {tabla['proteinas_g']:.4f} g  (esperado: 10.4934)")
+            print(f"  Sodio: {tabla['sodio_mg']:.4f} mg  (esperado: 16.3673)")
+        else:
+            print("  [SKIP] Producto 'Extrusión' no encontrado")
+
         print()
         print("  Verificación Jarabe:")
-        sp_j = (s.query(SubProducto)
+        sp_j = (s.query(Producto)
                  .filter_by(nombre="Jarabe")
                  .options(
-                     selectinload(SubProducto.receta_ingredientes)
-                         .selectinload(SubProductoIngrediente.ingrediente),
-                     selectinload(SubProducto.costos_operativos),
+                     selectinload(Producto.receta_ingredientes)
+                         .selectinload(RecetaIngrediente.ingrediente),
+                     selectinload(Producto.costos_operativos),
                  )
                  .first())
-        tj = sp_j.tabla_nutricional()
-        cj = sp_j.costo_final_kg()
-        print(f"  Energía Jarabe: {tj['energia_kcal']:.4f} kcal  (esperado: 193.7250)")
-        print(f"  Fibra Jarabe:   {tj['fibra_dietetica_g']:.4f} g   (esperado: 46.3625)")
-        print(f"  Costo Jarabe:   ${cj:,.4f} /kg  (esperado: $4,374.0909)")
+        if sp_j:
+            tj = sp_j.tabla_nutricional_100g()
+            cj = sp_j.costo_final_kg()
+            print(f"  Energía Jarabe: {tj['energia_kcal']:.4f} kcal  (esperado: 193.7250)")
+            print(f"  Fibra Jarabe:   {tj['fibra_dietetica_g']:.4f} g   (esperado: 46.3625)")
+            print(f"  Costo Jarabe:   ${cj:,.4f} /kg  (esperado: $4,374.0909)")
+        else:
+            print("  [SKIP] Producto 'Jarabe' no encontrado")
+
+        print()
+        print("  Verificación PT Granel:")
+        pf = (s.query(Producto)
+               .filter_by(nombre=PT_GRANEL["nombre"])
+               .options(
+                   selectinload(Producto.receta_productos)
+                       .selectinload(RecetaProducto.hijo)
+                       .selectinload(Producto.receta_ingredientes)
+                       .selectinload(RecetaIngrediente.ingrediente),
+                   selectinload(Producto.receta_productos)
+                       .selectinload(RecetaProducto.hijo)
+                       .selectinload(Producto.costos_operativos),
+               )
+               .first())
+        if pf:
+            t_pf = pf.tabla_nutricional_100g()
+            c_pf = pf.costo_final_kg()
+            merma_pf = pf.merma() * 100
+            print(f"  Merma PT Granel:   {merma_pf:.6f}%  (esperado: ~6.481850%)")
+            print(f"  Energía PT Granel: {t_pf['energia_kcal']:.4f} kcal")
+            print(f"  Costo PT Granel:   ${c_pf:,.4f} /kg")
+        else:
+            print(f"  [SKIP] Producto '{PT_GRANEL['nombre']}' no encontrado")
 
 
 if __name__ == "__main__":

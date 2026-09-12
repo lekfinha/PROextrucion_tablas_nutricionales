@@ -2,17 +2,16 @@ from src.database import engine, Base
 
 # Importar TODOS los modelos para que Base.metadata los registre
 # y create_all() cree sus tablas en data/nutricion.db
-from src.models.ingrediente import Ingrediente           # noqa: F401
-from src.models.subproducto import (                     # noqa: F401
-    SubProducto,
-    SubProductoIngrediente,
-    SubProductoComponente,
+from src.models.ingrediente import Ingrediente                    # noqa: F401
+from src.models.producto import (                                 # noqa: F401
+    Producto,
+    RecetaIngrediente,
+    RecetaProducto,
     CostoOperativo,
 )
-from src.models.producto_final import (                  # noqa: F401
-    ProductoFinal,
-    ProductoFinalSubProducto,
-    CostoOperativoPT,
+from src.models.micronutriente import (                           # noqa: F401
+    Micronutriente,
+    ProductoMicronutriente,
 )
 from src.ui.app import AppNutricion
 
