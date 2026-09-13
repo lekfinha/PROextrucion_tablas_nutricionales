@@ -330,8 +330,11 @@ class Producto(Base):
         Retorna micronutrientes que superan el umbral de 5% DDR por porción,
         o que tienen destacado_en_envase=True.
 
+        Fórmula % DDR (RSA Art 115/118):
+          ((cantidad_por_100g / 100) * tamaño_porción) / valor_ddr * 100
+
         Retorna: [{"nombre", "cantidad_100g", "cantidad_porcion",
-                   "unidad", "pct_ddr", "destacado"}, ...]
+                   "unidad", "pct_ddr", "destacado", "es_adicionado"}, ...]
         """
         pg = porcion_g if porcion_g is not None else self.porcion_g
         factor = pg / 100.0
@@ -351,9 +354,40 @@ class Producto(Base):
                     "unidad":           micro.unidad,
                     "pct_ddr":          pct_ddr,
                     "destacado":        pm.destacado_en_envase,
+                    "es_adicionado":    pm.es_adicionado,
                 })
 
         return resultado
+
+    def evaluar_descriptores_micronutrientes(
+        self, porcion_g: float | None = None,
+    ) -> list[str]:
+        """
+        Evalúa descriptores nutricionales legales (RSA Art 120) por porción.
+
+        Retorna una lista de afirmaciones permitidas:
+        - % DDR >= 20%  → "Excelente fuente de {nombre}"
+        - 10% <= % DDR < 20%  → "Buena fuente de {nombre}"
+        - es_adicionado=True AND % DDR >= 10%  → "Fortificado en {nombre}"
+        """
+        pg = porcion_g if porcion_g is not None else self.porcion_g
+        factor = pg / 100.0
+        descriptores = []
+
+        for pm in self.micronutrientes:
+            micro = pm.micronutriente
+            cant_porcion = pm.cantidad_100g * factor
+            pct_ddr = (cant_porcion / micro.ddr * 100.0) if micro.ddr > 0 else 0.0
+
+            if pct_ddr >= 20.0:
+                descriptores.append(f"Excelente fuente de {micro.nombre}")
+            elif pct_ddr >= 10.0:
+                descriptores.append(f"Buena fuente de {micro.nombre}")
+
+            if pm.es_adicionado and pct_ddr >= 10.0:
+                descriptores.append(f"Fortificado en {micro.nombre}")
+
+        return descriptores
 
     # ══════════════════════════════════════════════════════════════════════════
     # CÁLCULOS DE COSTOS
@@ -401,8 +435,43 @@ class Producto(Base):
         return False
 
     # ══════════════════════════════════════════════════════════════════════════
-    # CADUCIDAD
+    # CADUCIDAD — Enfoque mixto (procesos vs. materias primas)
+    #
+    # La caducidad de un producto procesado la dicta la TECNOLOGÍA DE
+    # CONSERVACIÓN y su humedad final, NO el ingrediente más perecedero.
+    #
+    # - self.meses_caducidad: valor OFICIAL (basado en estudios de vida útil)
+    # - caducidad_minima_componentes(): valor SUGERIDO (mín del árbol BOM)
+    #   Útil como alerta para subproductos crudos o mezclas sin tratamiento.
     # ══════════════════════════════════════════════════════════════════════════
+
+    def caducidad_minima_componentes(self) -> int | None:
+        """
+        Recorre todo el árbol BOM y retorna el mínimo de meses_caducidad
+        de todos los componentes (ingredientes y productos hijos).
+
+        Útil como SUGERENCIA / ALERTA, no como valor oficial.
+        El valor oficial es self.meses_caducidad (asignado por el usuario
+        basado en estudios de vida útil reales).
+
+        Retorna None si ningún componente tiene meses_caducidad definido.
+        """
+        valores: list[int] = []
+
+        for rel in self.receta_ingredientes:
+            if rel.ingrediente.meses_caducidad is not None:
+                valores.append(rel.ingrediente.meses_caducidad)
+
+        for comp in self.receta_productos:
+            # El producto hijo puede tener su propia caducidad oficial
+            if comp.hijo.meses_caducidad is not None:
+                valores.append(comp.hijo.meses_caducidad)
+            # También revisar recursivamente sus componentes
+            hijo_min = comp.hijo.caducidad_minima_componentes()
+            if hijo_min is not None:
+                valores.append(hijo_min)
+
+        return min(valores) if valores else None
 
     def _recolectar_ingredientes_hoja(self) -> list["Ingrediente"]:
         """Recolecta todos los ingredientes hoja del árbol recursivamente."""
@@ -415,9 +484,11 @@ class Producto(Base):
 
     def fecha_caducidad_estimada(self) -> date | None:
         """
-        Fecha de caducidad estimada = la más temprana de todas las
-        fichas técnicas de ingredientes hoja.
-        Retorna None si ningún ingrediente tiene fecha.
+        Fecha más temprana de vencimiento de fichas técnicas de proveedores.
+        Útil para alertar sobre fichas que necesitan renovación.
+
+        Nota: esto NO es la caducidad del producto (que la dicta el proceso),
+        es la vigencia de la documentación de los ingredientes.
         """
         ingredientes = self._recolectar_ingredientes_hoja()
         fechas = [ing.fecha_vencimiento_ficha for ing in ingredientes
@@ -426,14 +497,15 @@ class Producto(Base):
 
     def ingredientes_proximos_a_caducar(self, n: int = 5) -> list[tuple]:
         """
-        Retorna los `n` ingredientes con fecha de caducidad más próxima.
+        Retorna los `n` ingredientes con fecha de vencimiento de ficha
+        técnica más próxima. Útil para gestión de proveedores.
+
         Cada elemento: (ingrediente, fecha_vencimiento_ficha)
         """
         ingredientes = self._recolectar_ingredientes_hoja()
         con_fecha = [(ing, ing.fecha_vencimiento_ficha) for ing in ingredientes
                      if ing.fecha_vencimiento_ficha is not None]
         con_fecha.sort(key=lambda x: x[1])
-        # Eliminar duplicados (mismo ingrediente puede aparecer varias veces)
         vistos: set[int] = set()
         unicos: list[tuple] = []
         for ing, fecha in con_fecha:

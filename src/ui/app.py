@@ -196,6 +196,7 @@ class AppNutricion(tk.Tk):
                                       critico=False, critico_auto=False,
                                       humedad_final_pct=0.0,
                                       micronutrientes=None,
+                                      descriptores=None,
                                       caducidad_info=None):
         top = tk.Toplevel(self)
         top.title(titulo_ventana)
@@ -215,16 +216,31 @@ class AppNutricion(tk.Tk):
         info_negocio = f"Crítico: {crit_txt}  |  Costo final: ${costo_kg:,.2f} /kg"
         tk.Label(top, text=info_negocio, font=FONT_PEQUEÑA, bg=COLOR_BG, fg="#555555").pack()
 
-        # ── Caducidad ──
+        # ── Caducidad (enfoque mixto) ──
         if caducidad_info:
-            fecha_est = caducidad_info.get("fecha_estimada")
+            oficial = caducidad_info.get("meses_oficial")
+            sugerida = caducidad_info.get("meses_min_componentes")
+            fichas_venc = caducidad_info.get("ficha_vencimiento")
             proximos = caducidad_info.get("proximos", [])
-            cad_txt = f"Caducidad estimada: {fecha_est}" if fecha_est else "Sin fechas de caducidad"
-            tk.Label(top, text=cad_txt, font=FONT_PEQUEÑA, bg=COLOR_BG,
-                     fg=COLOR_PELIGRO if fecha_est else "#757575").pack()
+
+            parts = []
+            if oficial is not None:
+                parts.append(f"Vida útil oficial: {oficial} meses")
+            if sugerida is not None:
+                alerta = ""
+                if oficial is not None and sugerida < oficial:
+                    alerta = " ⚠️ menor que la oficial"
+                parts.append(f"Mín. componentes: {sugerida} meses{alerta}")
+            if fichas_venc:
+                parts.append(f"Ficha más próxima: {fichas_venc}")
+
+            if parts:
+                cad_txt = "  |  ".join(parts)
+                color = COLOR_WARN if (sugerida and oficial and sugerida < oficial) else "#555555"
+                tk.Label(top, text=cad_txt, font=FONT_PEQUEÑA, bg=COLOR_BG, fg=color).pack()
             if proximos:
                 prox_txt = "  |  ".join(f"{n}: {f}" for n, f in proximos[:3])
-                tk.Label(top, text=f"Próximos: {prox_txt}",
+                tk.Label(top, text=f"Ingredientes próximos: {prox_txt}",
                          font=FONT_PEQUEÑA, bg=COLOR_BG, fg="#757575").pack()
 
         tk.Frame(top, bg="#BDBDBD", height=1).pack(fill="x", padx=20, pady=8)
@@ -260,12 +276,28 @@ class AppNutricion(tk.Tk):
             tree.insert("", "end", values=("", "", ""))
             tree.insert("", "end", values=("── Micronutrientes ──", "", ""))
             for mn in micronutrientes:
-                dest = " ★" if mn["destacado"] else ""
-                label = f"    {mn['nombre']} ({mn['unidad']}){dest}"
+                marcas = ""
+                if mn.get("destacado"):
+                    marcas += " ★"
+                if mn.get("es_adicionado"):
+                    marcas += " ⊕"
+                label = f"    {mn['nombre']} ({mn['unidad']}){marcas}"
                 tree.insert("", "end", values=(
                     label,
                     redondear_minsal(mn["cantidad_100g"]),
                     f"{redondear_minsal(mn['cantidad_porcion'])} ({mn['pct_ddr']:.1f}% DDR)"))
+
+        # ── Descriptores nutricionales (RSA Art 120) ──
+        if descriptores:
+            tk.Frame(top, bg="#BDBDBD", height=1).pack(fill="x", padx=20, pady=4)
+            frame_desc = tk.Frame(top, bg=COLOR_BG)
+            frame_desc.pack(fill="x", padx=15, pady=(0, 4))
+            tk.Label(frame_desc, text="Descriptores Nutricionales (RSA Art 120):",
+                     font=FONT_BOLD, bg=COLOR_BG, fg=COLOR_ACENTO).pack(anchor="w")
+            for desc in descriptores:
+                color = "#1565C0" if "Excelente" in desc or "Fortificado" in desc else "#43A047"
+                tk.Label(frame_desc, text=f"  ✓ {desc}",
+                         font=FONT_NORMAL, bg=COLOR_BG, fg=color).pack(anchor="w")
 
         # ── Sección de sellos / destacadores ──
         tk.Frame(top, bg="#BDBDBD", height=1).pack(fill="x", padx=20, pady=4)
@@ -454,6 +486,13 @@ class AppNutricion(tk.Tk):
         self._boton(row_pdf, "📂", lambda: self._seleccionar_pdf(),
                     ancho=4).pack(side="right", padx=4)
 
+        row_mc = tk.Frame(frame_form, bg=COLOR_BG)
+        row_mc.pack(fill="x", pady=3, padx=4)
+        tk.Label(row_mc, text="Vida útil (meses):", font=FONT_NORMAL,
+                 bg=COLOR_BG, width=26, anchor="w").pack(side="left")
+        self._e_meses_cad = tk.Entry(row_mc, font=FONT_NORMAL, relief="solid", bd=1)
+        self._e_meses_cad.pack(side="right", expand=True, fill="x")
+
     def _seleccionar_pdf(self):
         path = filedialog.askopenfilename(
             title="Seleccionar ficha técnica PDF",
@@ -486,6 +525,9 @@ class AppNutricion(tk.Tk):
             self._e_pdf_path.delete(0, tk.END)
             if ing.ruta_pdf_ficha:
                 self._e_pdf_path.insert(0, ing.ruta_pdf_ficha)
+            self._e_meses_cad.delete(0, tk.END)
+            if ing.meses_caducidad is not None:
+                self._e_meses_cad.insert(0, str(ing.meses_caducidad))
 
     def guardar_ingrediente(self, modo):
         try:
@@ -512,6 +554,9 @@ class AppNutricion(tk.Tk):
             pdf_str = self._e_pdf_path.get().strip()
             if pdf_str:
                 datos["ruta_pdf_ficha"] = pdf_str
+            mc_str = self._e_meses_cad.get().strip()
+            if mc_str:
+                datos["meses_caducidad"] = int(mc_str)
 
             with Session(engine) as s:
                 if modo == "modificar":
@@ -1117,14 +1162,18 @@ class AppNutricion(tk.Tk):
                 critico_auto = p_l.critico_calculado()
                 humedad_pct  = p_l.humedad_final * 100.0
                 micros       = p_l.tabla_micronutrientes_filtrada()
+                descs        = p_l.evaluar_descriptores_micronutrientes()
 
-                # Caducidad
+                # Caducidad (enfoque mixto)
                 cad_info = None
-                fecha_est = p_l.fecha_caducidad_estimada()
+                min_comp = p_l.caducidad_minima_componentes()
+                fecha_ficha = p_l.fecha_caducidad_estimada()
                 prox = p_l.ingredientes_proximos_a_caducar(5)
-                if fecha_est or prox:
+                if p_l.meses_caducidad or min_comp or fecha_ficha or prox:
                     cad_info = {
-                        "fecha_estimada": str(fecha_est) if fecha_est else None,
+                        "meses_oficial": p_l.meses_caducidad,
+                        "meses_min_componentes": min_comp,
+                        "ficha_vencimiento": str(fecha_ficha) if fecha_ficha else None,
                         "proximos": [(ing.nombre, str(f)) for ing, f in prox],
                     }
 
@@ -1137,7 +1186,7 @@ class AppNutricion(tk.Tk):
                 porcion_final, merma_pct, factor, costo_kg,
                 critico=critico_p, critico_auto=critico_auto,
                 humedad_final_pct=humedad_pct, micronutrientes=micros,
-                caducidad_info=cad_info)
+                descriptores=descs, caducidad_info=cad_info)
             self.mostrar_menu_productos()
 
         except ValueError as exc:
@@ -1165,13 +1214,17 @@ class AppNutricion(tk.Tk):
                 critico_auto = p.critico_calculado()
                 humedad_pct  = p.humedad_final * 100.0
                 micros       = p.tabla_micronutrientes_filtrada()
+                descs        = p.evaluar_descriptores_micronutrientes()
 
-                fecha_est = p.fecha_caducidad_estimada()
+                min_comp = p.caducidad_minima_componentes()
+                fecha_ficha = p.fecha_caducidad_estimada()
                 prox = p.ingredientes_proximos_a_caducar(5)
                 cad_info = None
-                if fecha_est or prox:
+                if p.meses_caducidad or min_comp or fecha_ficha or prox:
                     cad_info = {
-                        "fecha_estimada": str(fecha_est) if fecha_est else None,
+                        "meses_oficial": p.meses_caducidad,
+                        "meses_min_componentes": min_comp,
+                        "ficha_vencimiento": str(fecha_ficha) if fecha_ficha else None,
                         "proximos": [(ing.nombre, str(f)) for ing, f in prox],
                     }
 
@@ -1180,7 +1233,7 @@ class AppNutricion(tk.Tk):
                 nombre, tabla_100g, tabla_p, porcion_g, merma_pct, factor, costo,
                 critico=critico, critico_auto=critico_auto,
                 humedad_final_pct=humedad_pct, micronutrientes=micros,
-                caducidad_info=cad_info)
+                descriptores=descs, caducidad_info=cad_info)
             self.mostrar_menu_productos()
         except Exception as exc:
             messagebox.showerror("Error", str(exc))

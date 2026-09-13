@@ -1,5 +1,5 @@
 from datetime import datetime, date
-from sqlalchemy import String, Float, Boolean, DateTime, Date, UniqueConstraint
+from sqlalchemy import String, Float, Integer, Boolean, DateTime, Date, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 from src.database import Base
 
@@ -29,6 +29,8 @@ class Ingrediente(Base):
         Date, nullable=True, default=None)
     ruta_pdf_ficha: Mapped[str | None] = mapped_column(
         String, nullable=True, default=None)
+    meses_caducidad: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, default=None)
 
     # ── Calorías y Proteínas ──────────────────────────────────────────────────
     energia_kcal: Mapped[float] = mapped_column(Float, default=0.0)

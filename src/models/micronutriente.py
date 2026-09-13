@@ -2,7 +2,11 @@
 Modelos de Micronutrientes — RSA Art 118 y 115 letra b.
 
 Catálogo de vitaminas y minerales con sus DDR (Dosis Diaria de Referencia)
-y tabla de asociación para declarar micronutrientes en cada Producto.
+según el Codex Alimentarius (CAC/GL 2-1985). Para Vitamina E, Biotina,
+Ácido Pantoténico, Cobre y Selenio se usan los RDI de la FDA, como
+establece el RSA Art 118.
+
+Tabla de asociación para declarar micronutrientes en cada Producto.
 """
 
 from __future__ import annotations
@@ -15,10 +19,10 @@ from src.database import Base
 
 class Micronutriente(Base):
     """
-    Catálogo de vitaminas y minerales con su DDR.
+    Catálogo de vitaminas y minerales con su DDR (valor_ddr).
 
-    Ejemplo: Vitamina A — DDR = 600 mcg, Calcio — DDR = 1000 mg
-    Pre-cargado con valores del RSA chileno.
+    Ejemplo: Vitamina A — DDR = 800 µg (Codex), Selenio — DDR = 55 µg (FDA)
+    Pre-cargado con valores oficiales.
     """
     __tablename__ = "micronutrientes"
 
@@ -36,9 +40,15 @@ class ProductoMicronutriente(Base):
     """
     Micronutrientes específicos declarados en un Producto.
 
-    Un micronutriente se incluye en la tabla nutricional SOLO si:
-    - Su valor por porción ≥ 5% de su DDR (RSA Art 118), O
-    - destacado_en_envase = True (ej: "Fortificado con Calcio")
+    Reglas de inclusión (RSA Art 118):
+    - Un micronutriente se incluye en la tabla nutricional si su valor
+      por porción ≥ 5% de su DDR.
+    - Si destacado_en_envase=True, se incluye siempre.
+
+    Descriptor (RSA Art 120):
+    - es_adicionado=True indica que fue fortificado artificialmente.
+      Permite usar el descriptor "Fortificado/Enriquecido en {nombre}"
+      si la adición por porción ≥ 10% DDR.
     """
     __tablename__ = "producto_micronutriente"
 
@@ -52,6 +62,7 @@ class ProductoMicronutriente(Base):
     )
     cantidad_100g: Mapped[float] = mapped_column(Float, default=0.0)
     destacado_en_envase: Mapped[bool] = mapped_column(Boolean, default=False)
+    es_adicionado: Mapped[bool] = mapped_column(Boolean, default=False)
 
     # Relaciones
     producto: Mapped["Producto"] = relationship(  # noqa: F821
@@ -65,31 +76,36 @@ class ProductoMicronutriente(Base):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Catálogo DDR estándar del RSA Chile
+# Catálogo DDR — Codex Alimentarius + excepciones FDA (RSA Art 118)
+#
+# Fuentes:
+#   - Codex Alimentarius, CAC/GL 2-1985 (NRV para etiquetado nutricional)
+#   - FDA 21 CFR 101.9 (Daily Reference Values, 2016 final rule)
+#     → Aplica para: Vitamina E, Biotina, Ác. Pantoténico, Cobre, Selenio
 # ──────────────────────────────────────────────────────────────────────────────
 
 DDR_RSA_CHILE: list[dict] = [
-    {"nombre": "Vitamina A",             "unidad": "mcg",  "ddr": 600.0},
-    {"nombre": "Vitamina C",             "unidad": "mg",   "ddr": 45.0},
-    {"nombre": "Vitamina D",             "unidad": "mcg",  "ddr": 5.0},
-    {"nombre": "Vitamina E",             "unidad": "mg",   "ddr": 10.0},
-    {"nombre": "Vitamina K",             "unidad": "mcg",  "ddr": 65.0},
-    {"nombre": "Vitamina B1 (Tiamina)",  "unidad": "mg",   "ddr": 1.2},
-    {"nombre": "Vitamina B2 (Riboflavina)", "unidad": "mg","ddr": 1.3},
-    {"nombre": "Vitamina B3 (Niacina)",  "unidad": "mg",   "ddr": 16.0},
-    {"nombre": "Vitamina B6",            "unidad": "mg",   "ddr": 1.3},
-    {"nombre": "Vitamina B12",           "unidad": "mcg",  "ddr": 2.4},
-    {"nombre": "Ácido Fólico",           "unidad": "mcg",  "ddr": 400.0},
-    {"nombre": "Ácido Pantoténico",      "unidad": "mg",   "ddr": 5.0},
-    {"nombre": "Biotina",                "unidad": "mcg",  "ddr": 30.0},
-    {"nombre": "Calcio",                 "unidad": "mg",   "ddr": 1000.0},
-    {"nombre": "Hierro",                 "unidad": "mg",   "ddr": 14.0},
-    {"nombre": "Zinc",                   "unidad": "mg",   "ddr": 11.0},
-    {"nombre": "Fósforo",                "unidad": "mg",   "ddr": 700.0},
-    {"nombre": "Magnesio",               "unidad": "mg",   "ddr": 310.0},
-    {"nombre": "Potasio",                "unidad": "mg",   "ddr": 3500.0},
-    {"nombre": "Cobre",                  "unidad": "mg",   "ddr": 0.9},
-    {"nombre": "Manganeso",              "unidad": "mg",   "ddr": 2.3},
-    {"nombre": "Selenio",                "unidad": "mcg",  "ddr": 55.0},
-    {"nombre": "Yodo",                   "unidad": "mcg",  "ddr": 150.0},
+    # ── Vitaminas ─────────────────────────────────────────────────────────────
+    {"nombre": "Vitamina A",                 "unidad": "µg",  "ddr": 800.0},   # Codex
+    {"nombre": "Vitamina C",                 "unidad": "mg",  "ddr": 60.0},    # Codex
+    {"nombre": "Vitamina D",                 "unidad": "µg",  "ddr": 5.0},     # Codex
+    {"nombre": "Vitamina E",                 "unidad": "mg",  "ddr": 10.0},    # FDA RDI
+    {"nombre": "Vitamina K",                 "unidad": "µg",  "ddr": 80.0},    # FDA
+    {"nombre": "Tiamina (Vitamina B1)",      "unidad": "mg",  "ddr": 1.4},     # Codex
+    {"nombre": "Riboflavina (Vitamina B2)",  "unidad": "mg",  "ddr": 1.6},     # Codex
+    {"nombre": "Niacina (Vitamina B3)",      "unidad": "mg",  "ddr": 18.0},    # Codex
+    {"nombre": "Vitamina B6",                "unidad": "mg",  "ddr": 2.0},     # Codex
+    {"nombre": "Ácido Fólico (Vitamina B9)", "unidad": "µg",  "ddr": 200.0},   # Codex
+    {"nombre": "Vitamina B12",               "unidad": "µg",  "ddr": 1.0},     # Codex
+    {"nombre": "Biotina",                    "unidad": "µg",  "ddr": 30.0},    # FDA RDI
+    {"nombre": "Ácido Pantoténico",          "unidad": "mg",  "ddr": 5.0},     # FDA RDI
+    # ── Minerales ─────────────────────────────────────────────────────────────
+    {"nombre": "Calcio",                     "unidad": "mg",  "ddr": 800.0},   # Codex
+    {"nombre": "Hierro",                     "unidad": "mg",  "ddr": 14.0},    # Codex
+    {"nombre": "Fósforo",                    "unidad": "mg",  "ddr": 800.0},   # Codex
+    {"nombre": "Yodo",                       "unidad": "µg",  "ddr": 150.0},   # Codex
+    {"nombre": "Magnesio",                   "unidad": "mg",  "ddr": 300.0},   # Codex
+    {"nombre": "Zinc",                       "unidad": "mg",  "ddr": 15.0},    # Codex
+    {"nombre": "Selenio",                    "unidad": "µg",  "ddr": 55.0},    # FDA RDI
+    {"nombre": "Cobre",                      "unidad": "mg",  "ddr": 0.9},     # FDA RDI
 ]
