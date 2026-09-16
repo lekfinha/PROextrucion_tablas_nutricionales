@@ -11,7 +11,8 @@ from src.database import engine
 from src.models.ingrediente import Ingrediente
 from src.models.producto import (Producto, RecetaIngrediente, RecetaProducto,
                                   CostoOperativo, NUTRIENTES, ETIQUETAS_NUTRIENTES)
-from src.models.micronutriente import Micronutriente, ProductoMicronutriente
+from src.models.micronutriente import (Micronutriente, ProductoMicronutriente,
+                                        IngredienteMicronutriente)
 from src.normativas import calcular_sellos, listar_normativas, NORMATIVAS_DISPONIBLES
 from src.utils.redondeo import redondear_minsal
 
@@ -65,6 +66,9 @@ class AppNutricion(tk.Tk):
         self._campos_en_fraccion = {"humedad_porcentaje"}
 
         self.entries: dict[str, tk.Entry] = {}
+        # Entries de micronutrientes del ingrediente: {micronutriente_id: Entry}
+        self._entries_micro: dict[int, tk.Entry] = {}
+        self._nombres_micro: dict[int, str] = {}
         self.mapa_ingredientes: dict[str, int] = {}
         self.mapa_productos:    dict[str, int] = {}
         self.ingrediente_actual_id: int | None = None
@@ -82,6 +86,8 @@ class AppNutricion(tk.Tk):
         for w in self.container.winfo_children():
             w.destroy()
         self.entries.clear()
+        self._entries_micro.clear()
+        self._nombres_micro.clear()
         self.ingrediente_actual_id = None
 
     def _titulo(self, parent, texto):
@@ -184,6 +190,10 @@ class AppNutricion(tk.Tk):
             selectinload(Producto.costos_operativos),
             selectinload(Producto.micronutrientes)
                 .selectinload(ProductoMicronutriente.micronutriente),
+            selectinload(Producto.receta_productos)
+                .selectinload(RecetaProducto.hijo)
+                .selectinload(Producto.micronutrientes)
+                .selectinload(ProductoMicronutriente.micronutriente),
         ]
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -207,7 +217,8 @@ class AppNutricion(tk.Tk):
         tk.Label(top, text=nombre_producto, font=FONT_TITULO, bg=COLOR_BG).pack(pady=(14, 2))
 
         # ── Cabecera: información de proceso (humedad separada) ──
-        info_proceso = f"Humedad: {humedad_final_pct:.2f}%  |  Merma: {merma_pct:.4f}%  |  Factor: ×{factor:.5f}"
+        info_proceso = (f"Humedad: {humedad_final_pct:.2f}%  |  "
+                        f"Concentración: {merma_pct:.4f}%  |  Factor: ×{factor:.5f}")
         tk.Label(top, text=info_proceso, font=FONT_PEQUEÑA, bg=COLOR_BG, fg="#555555").pack()
 
         crit_txt = "Sí" if critico else "No"
@@ -493,6 +504,54 @@ class AppNutricion(tk.Tk):
         self._e_meses_cad = tk.Entry(row_mc, font=FONT_NORMAL, relief="solid", bd=1)
         self._e_meses_cad.pack(side="right", expand=True, fill="x")
 
+        # ── Micronutrientes nativos (vitaminas y minerales por 100g) ──────────
+        self._construir_seccion_micronutrientes(frame_form)
+
+    def _construir_seccion_micronutrientes(self, frame_form):
+        """
+        Campos de micronutrientes del ingrediente, uno por entrada del catálogo.
+
+        Se dejan en blanco los que la ficha técnica del proveedor no declara;
+        solo se guardan los que tengan un valor mayor a cero.
+        """
+        self._separador(frame_form)
+        tk.Label(frame_form, text="Micronutrientes (por 100 g)",
+                 font=FONT_BOLD, bg=COLOR_BG).pack(anchor="w", padx=4)
+        tk.Label(frame_form,
+                 text=("Se declaran en la tabla nutricional solo si aportan ≥5% "
+                       "de la DDR por porción (RSA Art 118).\n"
+                       "Deja en blanco los que la ficha técnica no informe."),
+                 font=FONT_PEQUEÑA, bg=COLOR_BG, fg="#757575",
+                 justify="left").pack(anchor="w", padx=4, pady=(0, 4))
+
+        with Session(engine) as s:
+            catalogo = [
+                {"id": m.id, "nombre": m.nombre, "unidad": m.unidad, "ddr": m.ddr}
+                for m in s.query(Micronutriente).order_by(Micronutriente.id).all()
+            ]
+
+        if not catalogo:
+            tk.Label(frame_form,
+                     text=("⚠️  El catálogo de micronutrientes está vacío. "
+                           "Ejecuta scripts/seed_welliz_canela.py para cargarlo."),
+                     font=FONT_PEQUEÑA, bg=COLOR_BG, fg=COLOR_WARN,
+                     justify="left").pack(anchor="w", padx=4, pady=4)
+            return
+
+        for m in catalogo:
+            row = tk.Frame(frame_form, bg=COLOR_BG)
+            row.pack(fill="x", pady=2, padx=4)
+            tk.Label(row, text=f"{m['nombre']} ({m['unidad']})",
+                     font=FONT_NORMAL, bg=COLOR_BG, fg=COLOR_TEXTO,
+                     width=26, anchor="w").pack(side="left")
+            entry = tk.Entry(row, font=FONT_NORMAL, relief="solid", bd=1)
+            entry.pack(side="left", expand=True, fill="x")
+            tk.Label(row, text=f"DDR {m['ddr']:g} {m['unidad']}",
+                     font=FONT_PEQUEÑA, bg=COLOR_BG, fg="#9E9E9E",
+                     width=16, anchor="e").pack(side="right", padx=(6, 0))
+            self._entries_micro[m["id"]] = entry
+            self._nombres_micro[m["id"]] = m["nombre"]
+
     def _seleccionar_pdf(self):
         path = filedialog.askopenfilename(
             title="Seleccionar ficha técnica PDF",
@@ -528,6 +587,56 @@ class AppNutricion(tk.Tk):
             self._e_meses_cad.delete(0, tk.END)
             if ing.meses_caducidad is not None:
                 self._e_meses_cad.insert(0, str(ing.meses_caducidad))
+            # Micronutrientes nativos: queda en blanco lo que el ingrediente no declara
+            declarados = {im.micronutriente_id: im.cantidad_100g
+                          for im in ing.micronutrientes}
+            for mid, entry in self._entries_micro.items():
+                entry.delete(0, tk.END)
+                cantidad = declarados.get(mid)
+                if cantidad:
+                    entry.insert(0, f"{cantidad:g}")
+
+    def _leer_micronutrientes_formulario(self) -> dict[int, float]:
+        """
+        Lee los campos de micronutrientes del formulario de ingredientes.
+
+        Un campo en blanco no genera fila: que la ficha tecnica no informe un
+        micronutriente no es lo mismo que declarar que vale cero. Por eso el
+        cero tambien se descarta, en vez de guardarse como aporte nulo.
+        """
+        valores: dict[int, float] = {}
+        for mid, entry in self._entries_micro.items():
+            texto = entry.get().strip().replace(",", ".")
+            if not texto:
+                continue
+            nombre = self._nombres_micro.get(mid, f"micronutriente {mid}")
+            try:
+                cantidad = float(texto)
+            except ValueError:
+                raise ValueError(f"El valor de '{nombre}' no es un numero valido.")
+            if cantidad < 0:
+                raise ValueError(f"El valor de '{nombre}' no puede ser negativo.")
+            if cantidad > 0:
+                valores[mid] = cantidad
+        return valores
+
+    def _sincronizar_micronutrientes(self, ing, micros: dict[int, float]):
+        """
+        Deja ingrediente_micronutriente igual a lo que muestra el formulario:
+        actualiza las cantidades que cambiaron, agrega las nuevas y quita las
+        que el usuario borro (delete-orphan emite el DELETE).
+        """
+        existentes = {im.micronutriente_id: im for im in ing.micronutrientes}
+        for mid, cantidad in micros.items():
+            if mid in existentes:
+                existentes[mid].cantidad_100g = cantidad
+            else:
+                ing.micronutrientes.append(
+                    IngredienteMicronutriente(micronutriente_id=mid,
+                                              cantidad_100g=cantidad))
+        for mid, im in existentes.items():
+            if mid not in micros:
+                ing.micronutrientes.remove(im)
 
     def guardar_ingrediente(self, modo):
         try:
@@ -558,6 +667,8 @@ class AppNutricion(tk.Tk):
             if mc_str:
                 datos["meses_caducidad"] = int(mc_str)
 
+            micros = self._leer_micronutrientes_formulario()
+
             with Session(engine) as s:
                 if modo == "modificar":
                     if not self.ingrediente_actual_id:
@@ -565,8 +676,14 @@ class AppNutricion(tk.Tk):
                     ing = s.get(Ingrediente, self.ingrediente_actual_id)
                     for k, v in datos.items():
                         setattr(ing, k, v)
+                    self._sincronizar_micronutrientes(ing, micros)
                 else:
-                    s.add(Ingrediente(**datos))
+                    ing = Ingrediente(**datos)
+                    for mid, cantidad in micros.items():
+                        ing.micronutrientes.append(
+                            IngredienteMicronutriente(micronutriente_id=mid,
+                                                      cantidad_100g=cantidad))
+                    s.add(ing)
                 s.commit()
 
             messagebox.showinfo("✅ Éxito", "Ingrediente guardado correctamente.")

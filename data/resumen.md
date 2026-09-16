@@ -30,7 +30,7 @@ Su característica central es manejar el proceso de **extrusión**, donde la mez
     ├── models/
     │   ├── ingrediente.py      # Modelo `Ingrediente`. Materia prima pura, nodo hoja del BOM. Trazabilidad y macronutrientes.
     │   ├── producto.py         # Modelo `Producto` (unifica SubProducto y Producto Terminado). Contiene clases M2M `RecetaIngrediente`, `RecetaProducto` y `CostoOperativo`.
-    │   └── micronutriente.py   # Catálogo `Micronutriente` (Valores DDR Codex/FDA) y tabla asociativa `ProductoMicronutriente`.
+    │   └── micronutriente.py   # Catálogo `Micronutriente` (Valores DDR Codex/FDA) y tablas asociativas `ProductoMicronutriente` e `IngredienteMicronutriente`.
     ├── ui/
     │   └── app.py              # Interfaz completa. Menús de gestión, formularios CRUD, y Toplevels para renderizar las tablas nutricionales.
     └── utils/
@@ -59,14 +59,23 @@ La caducidad de un alimento extruido depende del proceso (humedad final, hornead
 *   **Sellos:** Evalúa límites de Calorías, Sodio, Azúcares y Grasas Saturadas para determinar si aplica sello "Alto en...".
 *   **Descriptores de Micronutrientes (Art 120 RSA):** Determina frases legales como "Excelente fuente de...", "Buena fuente de..." o "Fortificado en..." basándose en los % de DDR (Dosis Diaria de Referencia del Codex Alimentarius).
 
+### E. Micronutrientes a través del árbol BOM
+Las materias primas declaran sus vitaminas y minerales nativos por 100 g en `IngredienteMicronutriente`. `Producto.micronutrientes_agregados_100g()` los pondera por la proporción de cada componente y los escala por el factor de concentración, igual que los macronutrientes.
+
+`Producto.micronutrientes_efectivos_100g()` combina ese aporte nativo con las declaraciones propias del producto (`ProductoMicronutriente`):
+*   `es_adicionado=True` → fortificación: **se suma** al aporte nativo.
+*   `es_adicionado=False` → valor medido u oficial (ej. análisis de laboratorio): **reemplaza** al calculado, que siempre es una estimación.
+
+La tabla impresa y los descriptores del Art 120 se evalúan sobre el valor efectivo. Solo se declara lo que aporta ≥5% de la DDR por porción (RSA Art 118), salvo lo destacado en envase.
+
 ## 5. Tareas Pendientes / Siguientes Pasos
 
-1.  **Micronutrientes en Ingredientes Individuales:** 
-    *   *Estado:* Actualmente los micronutrientes solo se pueden asociar a un `Producto` final/subproducto.
-    *   *Requerimiento:* Crear una tabla `IngredienteMicronutriente` para que las materias primas (ej. Harina) puedan declarar sus micronutrientes nativos.
-    *   *Lógica:* Modificar la matemática del árbol BOM en `Producto` para que recolecte y escale automáticamente los micronutrientes provenientes de sus ingredientes subyacentes, aplicando las proporciones y la merma. Actualizar UI para gestionarlo.
+1.  ~~**Micronutrientes en Ingredientes Individuales**~~ — *Completado.* Ver sección 4.E. Falta cargar los valores reales de las fichas técnicas de los proveedores en los ingredientes ya existentes (hoy la tabla `ingrediente_micronutriente` está vacía).
 2.  **Manejo de Repositorio (Git):**
     *   *Estado:* El código local tiene inicializado un repositorio Git con commits locales hasta el refactor actual.
     *   *Requerimiento:* El usuario debe crear el repositorio en GitHub (o similar), generar su Personal Access Token (PAT), configurar el origin y hacer push de la rama `main`.
 3.  **Exportación a Excel / PDF (Opcional a futuro):**
     *   Poder exportar la Ficha Técnica final completa generada por la UI a un archivo compartible.
+4.  **Compilación a `.exe` mediante GitHub Actions:**
+    *   *Requerimiento:* Configurar un flujo de trabajo (`workflow` en `.github/workflows/`) que utilice `PyInstaller` (u otra herramienta similar) para compilar automáticamente el código en un ejecutable `.exe` para Windows cada vez que se haga push a la rama principal.
+    *   *Consideraciones técnicas:* Se debe prestar atención al manejo de base de datos relativa (`data/nutricion.db`) y a los *hidden imports* de SQLAlchemy en PyInstaller para que el ejecutable funcione en las computadoras de PRO Extrusión sin necesidad de instalar Python.

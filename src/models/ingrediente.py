@@ -1,15 +1,21 @@
 from datetime import datetime, date
+from typing import TYPE_CHECKING
+
 from sqlalchemy import String, Float, Integer, Boolean, DateTime, Date, UniqueConstraint
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 from src.database import Base
+
+if TYPE_CHECKING:
+    from src.models.micronutriente import IngredienteMicronutriente
 
 
 class Ingrediente(Base):
     """
     Materia prima pura (nodo hoja del BOM).
 
-    Almacena la composición nutricional por cada 100g, costo por kg,
-    y datos de trazabilidad del proveedor.
+    Almacena la composición nutricional por cada 100g (macronutrientes como
+    columnas fijas, micronutrientes como filas en ingrediente_micronutriente),
+    costo por kg y datos de trazabilidad del proveedor.
     """
     __tablename__ = "ingredientes"
     __table_args__ = (
@@ -58,6 +64,13 @@ class Ingrediente(Base):
     # ── Otros ─────────────────────────────────────────────────────────────────
     sodio_mg: Mapped[float] = mapped_column(Float, default=0.0)
     humedad_porcentaje: Mapped[float] = mapped_column(Float, default=0.0)
+
+    # ── Micronutrientes nativos (vitaminas y minerales por 100g) ─────────────
+    micronutrientes: Mapped[list["IngredienteMicronutriente"]] = relationship(
+        back_populates="ingrediente",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
 
     @property
     def id_unico(self) -> str:

@@ -1,0 +1,6 @@
+# Dependencias de RUNTIME — únicamente lo que main.py importa en ejecución.
+# Se usa para compilar el .exe: incluir pandas/scipy/streamlit (que están en
+# requirements.txt como dependencias de fases futuras) infla el ejecutable
+# cientos de MB y hace fallar la compilación.
+# tkinter viene incluido en la instalación estándar de Python en Windows.
+SQLAlchemy>=2.0.0

@@ -71,6 +71,10 @@ NUTRIENTES = [
     "sodio_mg",
 ]
 
+# Umbral de declaración de micronutrientes en la tabla nutricional.
+# RSA Art 118: se declaran solo los que aportan >= 5% de la DDR por porción.
+UMBRAL_DECLARACION_DDR = 5.0
+
 # Etiquetas legibles — colesterol indentado bajo grasas
 ETIQUETAS_NUTRIENTES: dict[str, str] = {
     "energia_kcal":             "Energía (kcal)",
@@ -323,60 +327,140 @@ class Producto(Base):
     # MICRONUTRIENTES DINÁMICOS (RSA Art 118)
     # ══════════════════════════════════════════════════════════════════════════
 
+    def micronutrientes_agregados_100g(self) -> dict[int, dict]:
+        """
+        Micronutrientes que aporta el árbol BOM, por 100 g de este producto.
+
+        Mismo algoritmo que tabla_nutricional_100g(): suma ponderada de los
+        aportes de los ingredientes directos y de los productos hijos, todo
+        escalado por el factor de concentración — el agua que se evapora en la
+        extrusión concentra las vitaminas y minerales igual que los macros.
+
+        Retorna {micronutriente_id: {"micro": Micronutriente, "cantidad_100g": float}}
+        """
+        acumulado: dict[int, dict] = {}
+
+        def _sumar(micro, cantidad: float) -> None:
+            reg = acumulado.setdefault(
+                micro.id, {"micro": micro, "cantidad_100g": 0.0})
+            reg["cantidad_100g"] += cantidad
+
+        for rel in self.receta_ingredientes:
+            for im in rel.ingrediente.micronutrientes:
+                _sumar(im.micronutriente, rel.proporcion * im.cantidad_100g)
+
+        # Los hijos aportan su valor efectivo (BOM + sus propias declaraciones),
+        # que ya viene concentrado por el factor del hijo.
+        for comp in self.receta_productos:
+            for reg in comp.hijo.micronutrientes_efectivos_100g().values():
+                _sumar(reg["micro"], comp.proporcion * reg["cantidad_100g"])
+
+        factor = self.factor_concentracion()
+        if factor != 1.0:
+            for reg in acumulado.values():
+                reg["cantidad_100g"] *= factor
+
+        return acumulado
+
+    def micronutrientes_efectivos_100g(self) -> dict[int, dict]:
+        """
+        Micronutrientes totales por 100 g: lo que aporta el BOM combinado con
+        las declaraciones propias del producto (ProductoMicronutriente).
+
+        Regla de combinación:
+        - es_adicionado=True  → la declaración es una fortificación y se SUMA
+          al aporte nativo de las materias primas.
+        - es_adicionado=False → la declaración es un valor medido u oficial
+          (ej. análisis de laboratorio) y REEMPLAZA al valor calculado, que
+          siempre es una estimación.
+
+        Retorna {micronutriente_id: {"micro", "cantidad_100g", "destacado",
+                                     "es_adicionado", "origen"}}
+        """
+        efectivo: dict[int, dict] = {
+            mid: {
+                "micro":         reg["micro"],
+                "cantidad_100g": reg["cantidad_100g"],
+                "destacado":     False,
+                "es_adicionado": False,
+                "origen":        "bom",
+            }
+            for mid, reg in self.micronutrientes_agregados_100g().items()
+        }
+
+        for pm in self.micronutrientes:
+            micro = pm.micronutriente
+            nativo = efectivo.get(micro.id, {}).get("cantidad_100g", 0.0)
+            efectivo[micro.id] = {
+                "micro":         micro,
+                "cantidad_100g": (nativo + pm.cantidad_100g if pm.es_adicionado
+                                  else pm.cantidad_100g),
+                "destacado":     pm.destacado_en_envase,
+                "es_adicionado": pm.es_adicionado,
+                "origen":        "fortificado" if pm.es_adicionado else "declarado",
+            }
+
+        return efectivo
+
     def tabla_micronutrientes_filtrada(
         self, porcion_g: float | None = None,
     ) -> list[dict]:
         """
-        Retorna micronutrientes que superan el umbral de 5% DDR por porción,
-        o que tienen destacado_en_envase=True.
+        Micronutrientes declarables en la tabla nutricional impresa.
+
+        RSA Art 118: solo se declara un micronutriente si aporta al menos el
+        5% de su DDR por porción. Los que quedan por debajo se omiten, salvo
+        que estén destacados en el envase (ahí la declaración es obligatoria).
 
         Fórmula % DDR (RSA Art 115/118):
           ((cantidad_por_100g / 100) * tamaño_porción) / valor_ddr * 100
 
         Retorna: [{"nombre", "cantidad_100g", "cantidad_porcion",
-                   "unidad", "pct_ddr", "destacado", "es_adicionado"}, ...]
+                   "unidad", "pct_ddr", "destacado", "es_adicionado",
+                   "origen"}, ...]  ordenado por el catálogo.
         """
         pg = porcion_g if porcion_g is not None else self.porcion_g
         factor = pg / 100.0
         resultado = []
 
-        for pm in self.micronutrientes:
-            micro = pm.micronutriente
-            cant_porcion = pm.cantidad_100g * factor
+        for reg in self.micronutrientes_efectivos_100g().values():
+            micro = reg["micro"]
+            cant_porcion = reg["cantidad_100g"] * factor
             pct_ddr = (cant_porcion / micro.ddr * 100.0) if micro.ddr > 0 else 0.0
 
-            # RSA Art 118: incluir si ≥ 5% DDR o si está destacado en envase
-            if pct_ddr >= 5.0 or pm.destacado_en_envase:
+            if pct_ddr >= UMBRAL_DECLARACION_DDR or reg["destacado"]:
                 resultado.append({
                     "nombre":           micro.nombre,
-                    "cantidad_100g":    pm.cantidad_100g,
+                    "cantidad_100g":    reg["cantidad_100g"],
                     "cantidad_porcion": cant_porcion,
                     "unidad":           micro.unidad,
                     "pct_ddr":          pct_ddr,
-                    "destacado":        pm.destacado_en_envase,
-                    "es_adicionado":    pm.es_adicionado,
+                    "destacado":        reg["destacado"],
+                    "es_adicionado":    reg["es_adicionado"],
+                    "origen":           reg["origen"],
                 })
 
+        resultado.sort(key=lambda r: r["nombre"])
         return resultado
 
     def evaluar_descriptores_micronutrientes(
         self, porcion_g: float | None = None,
     ) -> list[str]:
         """
-        Evalúa descriptores nutricionales legales (RSA Art 120) por porción.
+        Evalúa descriptores nutricionales legales (RSA Art 120) por porción,
+        sobre el valor efectivo (BOM + declaraciones).
 
-        Retorna una lista de afirmaciones permitidas:
-        - % DDR >= 20%  → "Excelente fuente de {nombre}"
-        - 10% <= % DDR < 20%  → "Buena fuente de {nombre}"
-        - es_adicionado=True AND % DDR >= 10%  → "Fortificado en {nombre}"
+        - % DDR >= 20%                        → "Excelente fuente de {nombre}"
+        - 10% <= % DDR < 20%                  → "Buena fuente de {nombre}"
+        - es_adicionado=True AND % DDR >= 10% → "Fortificado en {nombre}"
         """
         pg = porcion_g if porcion_g is not None else self.porcion_g
         factor = pg / 100.0
         descriptores = []
 
-        for pm in self.micronutrientes:
-            micro = pm.micronutriente
-            cant_porcion = pm.cantidad_100g * factor
+        for reg in self.micronutrientes_efectivos_100g().values():
+            micro = reg["micro"]
+            cant_porcion = reg["cantidad_100g"] * factor
             pct_ddr = (cant_porcion / micro.ddr * 100.0) if micro.ddr > 0 else 0.0
 
             if pct_ddr >= 20.0:
@@ -384,10 +468,10 @@ class Producto(Base):
             elif pct_ddr >= 10.0:
                 descriptores.append(f"Buena fuente de {micro.nombre}")
 
-            if pm.es_adicionado and pct_ddr >= 10.0:
+            if reg["es_adicionado"] and pct_ddr >= 10.0:
                 descriptores.append(f"Fortificado en {micro.nombre}")
 
-        return descriptores
+        return sorted(descriptores)
 
     # ══════════════════════════════════════════════════════════════════════════
     # CÁLCULOS DE COSTOS

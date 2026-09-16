@@ -12,6 +12,7 @@ from src.models.producto import (                                 # noqa: F401
 from src.models.micronutriente import (                           # noqa: F401
     Micronutriente,
     ProductoMicronutriente,
+    IngredienteMicronutriente,
 )
 from src.ui.app import AppNutricion
 

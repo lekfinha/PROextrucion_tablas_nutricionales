@@ -5,30 +5,54 @@ on:
     branches: [ "main" ]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: windows-latest
 
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Configurar Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.12'
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
 
-    - name: Instalar dependencias
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
-        pip install pyinstaller
+      - name: Instalar dependencias de runtime
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-build.txt
+          pip install pyinstaller
 
-    - name: Compilar ejecutable con PyInstaller
-      run: |
-        pyinstaller --noconfirm --onefile --windowed --name "ProExtrusion_Gestor" main.py
+      - name: Compilar ejecutable con PyInstaller
+        run: >
+          pyinstaller --noconfirm --onefile --windowed
+          --name "ProExtrusion_Gestor"
+          --hidden-import sqlalchemy.dialects.sqlite
+          --exclude-module pandas
+          --exclude-module scipy
+          --exclude-module streamlit
+          --exclude-module numpy
+          --exclude-module matplotlib
+          --exclude-module openpyxl
+          main.py
 
-    - name: Subir EXE como artefacto
-      uses: actions/upload-artifact@v4
-      with:
-        name: ProExtrusion_Gestor_Windows
-        path: dist/ProExtrusion_Gestor.exe
+      - name: Verificar que el ejecutable se generó
+        run: |
+          if (-not (Test-Path "dist/ProExtrusion_Gestor.exe")) {
+            Write-Error "No se generó dist/ProExtrusion_Gestor.exe"
+            exit 1
+          }
+          $mb = (Get-Item "dist/ProExtrusion_Gestor.exe").Length / 1MB
+          Write-Host ("Ejecutable generado: {0:N1} MB" -f $mb)
+
+      - name: Subir EXE como artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: ProExtrusion_Gestor_Windows_${{ github.sha }}
+          path: dist/ProExtrusion_Gestor.exe
+          retention-days: 90
+          if-no-files-found: error

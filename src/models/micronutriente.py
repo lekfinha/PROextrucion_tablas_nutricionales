@@ -6,7 +6,8 @@ según el Codex Alimentarius (CAC/GL 2-1985). Para Vitamina E, Biotina,
 Ácido Pantoténico, Cobre y Selenio se usan los RDI de la FDA, como
 establece el RSA Art 118.
 
-Tabla de asociación para declarar micronutrientes en cada Producto.
+Tablas de asociación para declarar micronutrientes tanto en materias primas
+(Ingrediente) como en nodos del BOM (Producto).
 """
 
 from __future__ import annotations
@@ -73,6 +74,40 @@ class ProductoMicronutriente(Base):
         return (f"<ProductoMicronutriente producto_id={self.producto_id} "
                 f"micro='{self.micronutriente_id}' "
                 f"cant_100g={self.cantidad_100g}>")
+
+
+class IngredienteMicronutriente(Base):
+    """
+    Micronutrientes nativos de una materia prima, expresados por 100 g.
+
+    A diferencia de ProductoMicronutriente no lleva flags de etiquetado: un
+    ingrediente aporta lo que aporta, y las decisiones de declaración (destacar
+    en envase, fortificar) se toman a nivel de Producto.
+
+    Estos valores se propagan hacia arriba por el árbol BOM ponderados por la
+    proporción de cada componente y escalados por el factor de concentración,
+    igual que los macronutrientes — ver Producto.micronutrientes_agregados_100g().
+    """
+    __tablename__ = "ingrediente_micronutriente"
+
+    ingrediente_id: Mapped[int] = mapped_column(
+        ForeignKey("ingredientes.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    micronutriente_id: Mapped[int] = mapped_column(
+        ForeignKey("micronutrientes.id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    cantidad_100g: Mapped[float] = mapped_column(Float, default=0.0)
+
+    # Relaciones
+    ingrediente: Mapped["Ingrediente"] = relationship(  # noqa: F821
+        back_populates="micronutrientes")
+    micronutriente: Mapped[Micronutriente] = relationship(lazy="selectin")
+
+    def __repr__(self) -> str:
+        return (f"<IngredienteMicronutriente ingrediente_id={self.ingrediente_id} "
+                f"micro={self.micronutriente_id} cant_100g={self.cantidad_100g}>")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
