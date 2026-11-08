@@ -31,11 +31,14 @@ class Ingrediente(Base):
     # ── Trazabilidad ──────────────────────────────────────────────────────────
     fecha_creacion: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.now, nullable=False)
-    fecha_vencimiento_ficha: Mapped[date | None] = mapped_column(
-        Date, nullable=True, default=None)
+    # Las fichas técnicas no caducan: son válidas hasta que el proveedor emita
+    # una nueva versión. Solo se registra cuándo ingresó la ficha al sistema.
+    fecha_ingreso_ficha: Mapped[date | None] = mapped_column(
+        Date, nullable=True, default=date.today)
     ruta_pdf_ficha: Mapped[str | None] = mapped_column(
         String, nullable=True, default=None)
-    meses_caducidad: Mapped[int | None] = mapped_column(
+    # Vida útil de la materia prima, en semanas (hoja del árbol de caducidad)
+    semanas_caducidad: Mapped[int | None] = mapped_column(
         Integer, nullable=True, default=None)
 
     # ── Calorías y Proteínas ──────────────────────────────────────────────────

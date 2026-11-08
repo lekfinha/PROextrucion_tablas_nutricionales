@@ -236,7 +236,9 @@ class Producto(Base):
     # Trazabilidad
     fecha_creacion: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.now, nullable=False)
-    meses_caducidad: Mapped[int | None] = mapped_column(
+    # Sobrescritura manual de la vida útil (semanas). Si es None se usa la
+    # calculada en cascada desde los componentes.
+    semanas_caducidad_override: Mapped[int | None] = mapped_column(
         Integer, nullable=True, default=None)
 
     # ── Relaciones ORM ────────────────────────────────────────────────────────
@@ -519,84 +521,46 @@ class Producto(Base):
         return False
 
     # ══════════════════════════════════════════════════════════════════════════
-    # CADUCIDAD — Enfoque mixto (procesos vs. materias primas)
+    # CADUCIDAD EN CASCADA (semanas)
     #
-    # La caducidad de un producto procesado la dicta la TECNOLOGÍA DE
-    # CONSERVACIÓN y su humedad final, NO el ingrediente más perecedero.
-    #
-    # - self.meses_caducidad: valor OFICIAL (basado en estudios de vida útil)
-    # - caducidad_minima_componentes(): valor SUGERIDO (mín del árbol BOM)
-    #   Útil como alerta para subproductos crudos o mezclas sin tratamiento.
+    # - Ingrediente (hoja): semanas_caducidad.
+    # - Producto: mínimo de las semanas de todos sus componentes (ingredientes
+    #   y productos hijos), propagado recursivamente hacia arriba.
+    # - semanas_caducidad_override permite fijar manualmente el valor (ej. por
+    #   el proceso), sin afectar el cálculo ni el desglose de componentes.
     # ══════════════════════════════════════════════════════════════════════════
 
-    def caducidad_minima_componentes(self) -> int | None:
-        """
-        Recorre todo el árbol BOM y retorna el mínimo de meses_caducidad
-        de todos los componentes (ingredientes y productos hijos).
-
-        Útil como SUGERENCIA / ALERTA, no como valor oficial.
-        El valor oficial es self.meses_caducidad (asignado por el usuario
-        basado en estudios de vida útil reales).
-
-        Retorna None si ningún componente tiene meses_caducidad definido.
-        """
-        valores: list[int] = []
-
-        for rel in self.receta_ingredientes:
-            if rel.ingrediente.meses_caducidad is not None:
-                valores.append(rel.ingrediente.meses_caducidad)
-
-        for comp in self.receta_productos:
-            # El producto hijo puede tener su propia caducidad oficial
-            if comp.hijo.meses_caducidad is not None:
-                valores.append(comp.hijo.meses_caducidad)
-            # También revisar recursivamente sus componentes
-            hijo_min = comp.hijo.caducidad_minima_componentes()
-            if hijo_min is not None:
-                valores.append(hijo_min)
-
+    def semanas_caducidad_calculada(self) -> int | None:
+        """Mínimo de semanas entre los componentes directos (None si no hay datos)."""
+        valores = [c["semanas"] for c in self.componentes_caducidad()
+                   if c["semanas"] is not None]
         return min(valores) if valores else None
 
-    def _recolectar_ingredientes_hoja(self) -> list["Ingrediente"]:
-        """Recolecta todos los ingredientes hoja del árbol recursivamente."""
-        ingredientes = []
+    def semanas_caducidad_efectiva(self) -> int | None:
+        """Valor vigente: la sobrescritura manual si existe, si no la calculada."""
+        if self.semanas_caducidad_override is not None:
+            return self.semanas_caducidad_override
+        return self.semanas_caducidad_calculada()
+
+    def componentes_caducidad(self) -> list[dict]:
+        """
+        Componentes de UN nivel, ordenados de menor a mayor duración
+        (los que no tienen dato quedan al final).
+
+        Cada elemento: {"tipo": "ingrediente"|"producto", "id", "nombre", "semanas"}
+        Para productos hijos, "semanas" es su duración efectiva.
+        """
+        items = []
         for rel in self.receta_ingredientes:
-            ingredientes.append(rel.ingrediente)
+            ing = rel.ingrediente
+            items.append({"tipo": "ingrediente", "id": ing.id,
+                          "nombre": ing.nombre, "semanas": ing.semanas_caducidad})
         for comp in self.receta_productos:
-            ingredientes.extend(comp.hijo._recolectar_ingredientes_hoja())
-        return ingredientes
-
-    def fecha_caducidad_estimada(self) -> date | None:
-        """
-        Fecha más temprana de vencimiento de fichas técnicas de proveedores.
-        Útil para alertar sobre fichas que necesitan renovación.
-
-        Nota: esto NO es la caducidad del producto (que la dicta el proceso),
-        es la vigencia de la documentación de los ingredientes.
-        """
-        ingredientes = self._recolectar_ingredientes_hoja()
-        fechas = [ing.fecha_vencimiento_ficha for ing in ingredientes
-                  if ing.fecha_vencimiento_ficha is not None]
-        return min(fechas) if fechas else None
-
-    def ingredientes_proximos_a_caducar(self, n: int = 5) -> list[tuple]:
-        """
-        Retorna los `n` ingredientes con fecha de vencimiento de ficha
-        técnica más próxima. Útil para gestión de proveedores.
-
-        Cada elemento: (ingrediente, fecha_vencimiento_ficha)
-        """
-        ingredientes = self._recolectar_ingredientes_hoja()
-        con_fecha = [(ing, ing.fecha_vencimiento_ficha) for ing in ingredientes
-                     if ing.fecha_vencimiento_ficha is not None]
-        con_fecha.sort(key=lambda x: x[1])
-        vistos: set[int] = set()
-        unicos: list[tuple] = []
-        for ing, fecha in con_fecha:
-            if ing.id not in vistos:
-                vistos.add(ing.id)
-                unicos.append((ing, fecha))
-        return unicos[:n]
+            h = comp.hijo
+            items.append({"tipo": "producto", "id": h.id, "nombre": h.nombre,
+                          "semanas": h.semanas_caducidad_efectiva()})
+        items.sort(key=lambda c: (c["semanas"] is None, c["semanas"] or 0))
+        return items
 
     # ══════════════════════════════════════════════════════════════════════════
 

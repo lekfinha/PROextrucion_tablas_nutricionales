@@ -71,11 +71,7 @@ La tabla impresa y los descriptores del Art 120 se evalúan sobre el valor efect
 ## 5. Tareas Pendientes / Siguientes Pasos
 
 1.  ~~**Micronutrientes en Ingredientes Individuales**~~ — *Completado.* Ver sección 4.E. Falta cargar los valores reales de las fichas técnicas de los proveedores en los ingredientes ya existentes (hoy la tabla `ingrediente_micronutriente` está vacía).
-2.  **Manejo de Repositorio (Git):**
-    *   *Estado:* El código local tiene inicializado un repositorio Git con commits locales hasta el refactor actual.
-    *   *Requerimiento:* El usuario debe crear el repositorio en GitHub (o similar), generar su Personal Access Token (PAT), configurar el origin y hacer push de la rama `main`.
+2.  ~~**Manejo de Repositorio (Git)**~~ — *Completado.* El repo está en GitHub (`origin/main`).
 3.  **Exportación a Excel / PDF (Opcional a futuro):**
     *   Poder exportar la Ficha Técnica final completa generada por la UI a un archivo compartible.
-4.  **Compilación a `.exe` mediante GitHub Actions:**
-    *   *Requerimiento:* Configurar un flujo de trabajo (`workflow` en `.github/workflows/`) que utilice `PyInstaller` (u otra herramienta similar) para compilar automáticamente el código en un ejecutable `.exe` para Windows cada vez que se haga push a la rama principal.
-    *   *Consideraciones técnicas:* Se debe prestar atención al manejo de base de datos relativa (`data/nutricion.db`) y a los *hidden imports* de SQLAlchemy en PyInstaller para que el ejecutable funcione en las computadoras de PRO Extrusión sin necesidad de instalar Python.
+4.  ~~**Compilación a `.exe` mediante GitHub Actions**~~ — *Completado.* Workflow en `.github/workflows/build-windows.yml`. El `.exe` generado (`data/ProExtrusion_Gestor.exe`) no se versiona (está en `.gitignore`).

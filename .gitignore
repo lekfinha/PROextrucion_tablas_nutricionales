@@ -44,3 +44,7 @@ desktop.ini
 *.log
 .env
 .env.*
+
+# ── Ejecutables compilados ────────────────────────────────────────────────────
+data/*.exe
+*.exe
