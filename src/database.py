@@ -32,6 +32,15 @@ class Base(DeclarativeBase):
     pass
 
 
+# Columnas que el modelo dejó de usar y hay que quitar de bases antiguas.
+# Se listan a mano: borrar "todo lo que no esté en el modelo" convertiría un
+# typo en pérdida de datos.
+#   productos.tipo — era "subproducto"|"producto_final"; la distinción ya no
+#   existe (todos son Producto) y la columna es NOT NULL, así que dejarla
+#   rompería cualquier INSERT nuevo.
+COLUMNAS_OBSOLETAS: list[tuple[str, str]] = [("productos", "tipo")]
+
+
 def migrar_columnas_faltantes() -> list[str]:
     """
     Agrega a data/nutricion.db las columnas que el modelo declara y la tabla
@@ -39,12 +48,20 @@ def migrar_columnas_faltantes() -> list[str]:
     existentes, así que sin esto una base ya poblada revienta con
     "no such column" al agregar un campo.
 
-    Solo cubre el caso ADD COLUMN. Una columna NOT NULL sin server_default no
-    se puede agregar en SQLite y se omite (requiere migración manual).
-    Retorna la lista de columnas agregadas, para log.
+    También elimina las columnas de COLUMNAS_OBSOLETAS. Una columna NOT NULL
+    sin server_default no se puede agregar en SQLite y se omite (requiere
+    migración manual). Retorna la lista de cambios, para log.
     """
     agregadas: list[str] = []
     with engine.begin() as con:
+        for nombre_tabla, columna in COLUMNAS_OBSOLETAS:
+            presentes = {fila[1] for fila in
+                         con.exec_driver_sql(f'PRAGMA table_info("{nombre_tabla}")')}
+            if columna in presentes:
+                con.exec_driver_sql(
+                    f'ALTER TABLE "{nombre_tabla}" DROP COLUMN "{columna}"')
+                agregadas.append(f"−{nombre_tabla}.{columna}")
+
         for tabla in Base.metadata.sorted_tables:
             existentes = {fila[1] for fila in
                           con.exec_driver_sql(f'PRAGMA table_info("{tabla.name}")')}

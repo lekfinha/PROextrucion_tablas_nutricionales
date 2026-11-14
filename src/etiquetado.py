@@ -21,6 +21,8 @@ el Art. 107 — la lista declara la fórmula, no el producto deshidratado.
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -42,14 +44,14 @@ DECLARABLES: dict[str, tuple[str, str]] = {
     # código            nombre impreso en la etiqueta       tipo
     "leche":           ("Leche",                            TIPO_ALERGENO),
     "huevo":           ("Huevo",                            TIPO_ALERGENO),
-    "trigo":           ("Trigo (gluten)",                   TIPO_ALERGENO),
-    "centeno":         ("Centeno (gluten)",                 TIPO_ALERGENO),
-    "cebada":          ("Cebada (gluten)",                  TIPO_ALERGENO),
-    "avena":           ("Avena (gluten)",                   TIPO_ALERGENO),
-    "nueces":          ("Nueces y otros frutos secos",      TIPO_ALERGENO),
+    "trigo":           ("Trigo",                            TIPO_ALERGENO),
+    "centeno":         ("Centeno",                          TIPO_ALERGENO),
+    "cebada":          ("Cebada",                           TIPO_ALERGENO),
+    "avena":           ("Avena",                            TIPO_ALERGENO),
+    "nueces":          ("Nueces",                           TIPO_ALERGENO),
     "tartrazina":      ("Tartrazina",                       TIPO_COLORANTE),
-    "amarillo_ocaso":  ("Amarillo ocaso FCF",               TIPO_COLORANTE),
-    "rojo_allura":     ("Rojo allura AC",                   TIPO_COLORANTE),
+    "amarillo_ocaso":  ("Amarillo Crepúsculo",              TIPO_COLORANTE),
+    "rojo_allura":     ("Rojo Allura AC",                   TIPO_COLORANTE),
 }
 
 # Códigos que implican gluten: anulan el requerimiento "apto para celíacos".
@@ -63,6 +65,22 @@ REQUERIMIENTOS: dict[str, str] = {
     "vegano":        "Vegano",
     "apto_celiacos": "Apto para celíacos",
 }
+
+
+def _normalizar(texto: str) -> str:
+    """minúsculas, sin tildes y con espacios colapsados, para comparar nombres."""
+    sin_tildes = "".join(c for c in unicodedata.normalize("NFD", texto)
+                         if not unicodedata.combining(c))
+    return " ".join(sin_tildes.lower().split())
+
+
+def _nombra_al_alergeno(nombre_ingrediente: str, nombre_alergeno: str) -> bool:
+    """
+    ¿El nombre del ingrediente ya menciona el alérgeno? Evita el redundante
+    "Huevo (Huevo)" o "Harina de Trigo (Trigo)" y deja "Caseína (Leche)".
+    """
+    return re.search(rf"\b{re.escape(_normalizar(nombre_alergeno))}\b",
+                     _normalizar(nombre_ingrediente)) is not None
 
 
 @dataclass(frozen=True)
@@ -82,6 +100,27 @@ class LineaIngrediente:
     # dentro de la propia lista de ingredientes, además de la viñeta "Contiene".
     alergenos: list[str] = field(default_factory=list)
 
+    def formateada(self) -> str:
+        """
+        El nombre tal como va en la lista impresa:
+        - colorante destacado → **en negrilla** (markdown)
+        - alérgeno que el nombre no menciona → entre paréntesis al lado
+
+        "Caseína" + leche   → "Caseína (Leche)"
+        "Huevo"   + huevo   → "Huevo"            (no se repite)
+        "Amarillo Crepúsculo" + tartrazina → "**Amarillo Crepúsculo**"
+        """
+        texto = self.nombre
+        faltantes = [DECLARABLES[c][0] for c in self.alergenos
+                     if c in DECLARABLES
+                     and not _nombra_al_alergeno(self.nombre, DECLARABLES[c][0])]
+        if faltantes:
+            texto += f" ({', '.join(faltantes)})"
+        if any(DECLARABLES.get(c, ("", ""))[1] == TIPO_COLORANTE
+               for c in self.alergenos):
+            texto = f"**{texto}**"
+        return texto
+
 
 @dataclass
 class FichaEtiquetado:
@@ -96,7 +135,24 @@ class FichaEtiquetado:
     total_porcentaje: float
     alergenos_directos: list[Declaracion]
     trazas_advertencias: list[str]
-    requerimientos: dict[str, bool]
+    # requisito → ingredientes hoja que lo incumplen (vacío = se cumple).
+    # Guardar los culpables y no un bool permite explicar en la UI *por qué*
+    # un producto no es vegano, que es la pregunta que siempre sigue.
+    requerimientos: dict[str, list[str]]
+    n_hojas: int = 0
+
+    def cumple(self, campo: str) -> bool:
+        """Un producto sin hojas no cumple nada: no hay nada que verificar."""
+        return self.n_hojas > 0 and not self.requerimientos.get(campo)
+
+    def texto_ingredientes(self) -> str:
+        """
+        Lista de ingredientes impresa, de mayor a menor: nombres separados por
+        coma, colorantes en **negrilla** y alérgenos entre paréntesis.
+
+        Ej: "Harina de garbanzos, Azúcar, **Amarillo Crepúsculo**, Caseína (Leche)"
+        """
+        return ", ".join(l.formateada() for l in self.ingredientes)
 
     @property
     def alergenos(self) -> list[Declaracion]:
@@ -138,7 +194,8 @@ def consolidar_etiquetado(producto: "Producto") -> FichaEtiquetado:
     lineas: dict[str, LineaIngrediente] = {}
     codigos: set[str] = set()
     trazas: dict[str, str] = {}          # texto normalizado → texto original
-    requerimientos = dict.fromkeys(REQUERIMIENTOS, True)
+    # requisito → {nombre del ingrediente que lo incumple: None} (set ordenado)
+    incumplen: dict[str, dict[str, None]] = {r: {} for r in REQUERIMIENTOS}
     hojas = 0
 
     def _anotar_traza(texto: str | None) -> None:
@@ -174,8 +231,14 @@ def consolidar_etiquetado(producto: "Producto") -> FichaEtiquetado:
 
             _anotar_traza(ing.trazas)
 
-            for campo in requerimientos:
-                requerimientos[campo] &= bool(getattr(ing, campo, False))
+            for campo in incumplen:
+                # Un cereal con gluten invalida el "apto para celíacos" aunque
+                # la ficha de la materia prima venga marcada por error.
+                falla = not getattr(ing, campo, False) or (
+                    campo == "apto_celiacos"
+                    and bool(set(ing.alergenos or []) & CODIGOS_GLUTEN))
+                if falla:
+                    incumplen[campo][linea.nombre] = None
 
         for comp in nodo.receta_productos:
             if comp.proporcion <= 0:
@@ -183,16 +246,6 @@ def consolidar_etiquetado(producto: "Producto") -> FichaEtiquetado:
             _visitar(comp.hijo, factor * comp.proporcion, ruta)
 
     _visitar(producto, 1.0, ())
-
-    # Un producto sin hojas no cumple nada: all() sobre vacío daría True y
-    # terminaría declarando "vegano" una receta sin ingredientes.
-    if hojas == 0:
-        requerimientos = dict.fromkeys(REQUERIMIENTOS, False)
-
-    # Un cereal con gluten en la fórmula invalida el "apto para celíacos"
-    # aunque la ficha de alguna materia prima venga marcada por error.
-    if codigos & CODIGOS_GLUTEN:
-        requerimientos["apto_celiacos"] = False
 
     # Orden del catálogo; un código desconocido (dato antiguo o norma nueva)
     # nunca se descarta: se muestra tal cual al final.
@@ -202,6 +255,12 @@ def consolidar_etiquetado(producto: "Producto") -> FichaEtiquetado:
 
     ingredientes = sorted(lineas.values(), key=lambda l: (-l.porcentaje, l.nombre))
 
+    # Los culpables se listan en el mismo orden que la lista impresa: primero
+    # el que más pesa en la receta.
+    posicion = {l.nombre: i for i, l in enumerate(ingredientes)}
+    requerimientos = {campo: sorted(nombres, key=lambda n: posicion.get(n, 0))
+                      for campo, nombres in incumplen.items()}
+
     return FichaEtiquetado(
         producto=producto.nombre,
         ingredientes=ingredientes,
@@ -209,4 +268,5 @@ def consolidar_etiquetado(producto: "Producto") -> FichaEtiquetado:
         alergenos_directos=conocidos + otros,
         trazas_advertencias=list(trazas.values()),
         requerimientos=requerimientos,
+        n_hojas=hojas,
     )

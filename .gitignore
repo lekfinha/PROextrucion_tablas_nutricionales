@@ -1,5 +1,6 @@
 # ── Base de datos local ────────────────────────────────────────────────────────
 data/*.db
+data/*.db.bak-*
 data/*.db-shm
 data/*.db-wal
 

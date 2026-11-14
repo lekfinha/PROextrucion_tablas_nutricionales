@@ -1,8 +1,10 @@
 """
 Interfaz gráfica principal — Gestor Nutricional Pro Extrusion.
 
-Usa el modelo unificado Producto (reemplaza SubProducto + ProductoFinal).
+Usa el modelo unificado Producto: no hay distinción entre producto
+intermedio y terminado, cualquiera puede etiquetarse o componer a otro.
 """
+import re
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 from sqlalchemy.orm import Session, selectinload
@@ -126,10 +128,14 @@ class AppNutricion(tk.Tk):
                    lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.bind("<Configure>",
                     lambda e: canvas.itemconfig(win_id, width=e.width))
-        canvas.bind_all("<Button-4>", lambda e: canvas.yview_scroll(-1, "units"))
-        canvas.bind_all("<Button-5>", lambda e: canvas.yview_scroll(1, "units"))
-        canvas.bind_all("<MouseWheel>",
-                        lambda e: canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
+        # La rueda se liga a esta ventana y no con bind_all: si no, el último
+        # canvas creado (p.ej. el de la tabla nutricional) se queda con la
+        # rueda de toda la app y el formulario de atrás deja de scrollear.
+        raiz = parent.winfo_toplevel()
+        raiz.bind("<Button-4>", lambda e: canvas.yview_scroll(-1, "units"))
+        raiz.bind("<Button-5>", lambda e: canvas.yview_scroll(1, "units"))
+        raiz.bind("<MouseWheel>",
+                  lambda e: canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
         return outer, inner, canvas
 
     def _barra_botones(self, volver_cmd, guardar_cmd, guardar_texto="💾  Guardar"):
@@ -170,16 +176,14 @@ class AppNutricion(tk.Tk):
         self._recargar_mapa_ingredientes()
         return self._combobox_buscable(parent, sorted(self.mapa_ingredientes), callback)
 
-    def _recargar_mapa_productos(self, tipo_filtro=None):
+    def _recargar_mapa_productos(self):
         with Session(engine) as s:
             q = s.query(Producto).order_by(Producto.nombre)
-            if tipo_filtro:
-                q = q.filter(Producto.tipo == tipo_filtro)
             prods = q.all()
             self.mapa_productos = {p.nombre: p.id for p in prods}
 
-    def _crear_combobox_producto(self, parent, callback, tipo_filtro=None):
-        self._recargar_mapa_productos(tipo_filtro)
+    def _crear_combobox_producto(self, parent, callback):
+        self._recargar_mapa_productos()
         return self._combobox_buscable(parent, sorted(self.mapa_productos), callback)
 
     def _selectinload_completo(self):
@@ -285,24 +289,12 @@ class AppNutricion(tk.Tk):
         if expandido:
             alternar()
 
-    def _construir_bloque_etiquetado(self, parent, ficha):
-        """
-        Lista de ingredientes aplanada, «Contiene:» en negrilla y cuerpo mayor,
-        trazas en párrafo aparte y requerimientos cumplidos. El desglose se
-        despliega al hacer clic, igual que el de caducidad.
-        """
-        tk.Frame(parent, bg="#BDBDBD", height=1).pack(fill="x", padx=20, pady=4)
-        marco = tk.Frame(parent, bg=COLOR_BG)
-        marco.pack(fill="x", padx=15, pady=(0, 4))
-
-        resumen = (f"Ingredientes (RSA Art 107): {len(ficha.ingredientes)} "
-                   f"materias primas — total {ficha.total_porcentaje:.2f}%")
-        color = COLOR_WARN if abs(ficha.total_porcentaje - 100.0) > 0.01 else "#555555"
-        lbl = tk.Label(marco, text="▶ " + resumen, font=FONT_BOLD, bg=COLOR_BG,
+    def _acordeon(self, parent, resumen, color="#555555", abierto=False):
+        """Título clicable + frame plegable. Retorna el frame del contenido."""
+        lbl = tk.Label(parent, text="▶ " + resumen, font=FONT_BOLD, bg=COLOR_BG,
                        fg=color, cursor="hand2")
         lbl.pack(anchor="w")
-
-        cuerpo = tk.Frame(marco, bg=COLOR_BG)
+        cuerpo = tk.Frame(parent, bg=COLOR_BG)
         estado = {"abierto": False}
 
         def alternar(_event=None):
@@ -314,6 +306,45 @@ class AppNutricion(tk.Tk):
             lbl.config(text=("▼ " if estado["abierto"] else "▶ ") + resumen)
 
         lbl.bind("<Button-1>", alternar)
+        if abierto:
+            alternar()
+        return cuerpo
+
+    def _texto_con_negritas(self, parent, markdown, alto=3):
+        """
+        Pinta un string con **negritas** en un Text de solo lectura.
+        Text y no Label porque la lista de ingredientes se copia tal cual al
+        arte de la etiqueta, y así el usuario puede seleccionarla.
+        """
+        txt = tk.Text(parent, height=alto, wrap="word", font=FONT_NORMAL,
+                      bg="#FFFFFF", fg=COLOR_TEXTO, relief="solid", bd=1,
+                      padx=6, pady=4)
+        txt.tag_configure("negrita", font=FONT_BOLD)
+        for trozo in re.split(r"(\*\*[^*]+\*\*)", markdown):
+            if not trozo:
+                continue
+            if trozo.startswith("**") and trozo.endswith("**"):
+                txt.insert("end", trozo[2:-2], "negrita")
+            else:
+                txt.insert("end", trozo)
+        txt.config(state="disabled")
+        txt.pack(fill="x", padx=20, pady=(2, 0))
+        return txt
+
+    def _construir_bloque_etiquetado(self, parent, ficha):
+        """
+        Lista de ingredientes aplanada (tabla + string listo para el arte),
+        «Contiene:» en negrilla y cuerpo mayor, trazas en párrafo aparte y
+        desglose desplegable de requerimientos alimentarios.
+        """
+        tk.Frame(parent, bg="#BDBDBD", height=1).pack(fill="x", padx=20, pady=4)
+        marco = tk.Frame(parent, bg=COLOR_BG)
+        marco.pack(fill="x", padx=15, pady=(0, 4))
+
+        resumen = (f"Ingredientes (RSA Art 107): {len(ficha.ingredientes)} "
+                   f"materias primas — total {ficha.total_porcentaje:.2f}%")
+        color = COLOR_WARN if abs(ficha.total_porcentaje - 100.0) > 0.01 else "#555555"
+        cuerpo = self._acordeon(marco, resumen, color)
 
         tree = ttk.Treeview(cuerpo, columns=("ing", "pct", "al"),
                             show="headings",
@@ -331,6 +362,12 @@ class AppNutricion(tk.Tk):
             tree.insert("", "end", values=(linea.nombre, f"{linea.porcentaje:.3f}", marcas),
                         tags=("con_alergeno",) if marcas else ())
 
+        # String listo para el arte: orden decreciente, colorantes en negrilla
+        # y el alérgeno entre paréntesis cuando el nombre no lo menciona.
+        tk.Label(marco, text="Lista para el envase:", font=FONT_PEQUEÑA,
+                 bg=COLOR_BG, fg="#757575").pack(anchor="w", pady=(6, 0))
+        self._texto_con_negritas(marco, ficha.texto_ingredientes())
+
         # «Contiene:» — negrilla y cuerpo mayor, como exige la rotulación
         for texto in (ficha.texto_contiene(), ficha.texto_colorantes()):
             if texto:
@@ -343,12 +380,30 @@ class AppNutricion(tk.Tk):
                      bg=COLOR_BG, fg="#555555", wraplength=680,
                      justify="left").pack(anchor="w", pady=(2, 0))
 
-        cumple = [REQUERIMIENTOS[k] for k, v in ficha.requerimientos.items() if v]
-        tk.Label(marco,
-                 text=("Requerimientos: " + ", ".join(cumple)) if cumple
-                      else "Requerimientos: ninguno se cumple en el 100% de las materias primas",
-                 font=FONT_PEQUEÑA, bg=COLOR_BG,
-                 fg="#43A047" if cumple else "#757575").pack(anchor="w", pady=(2, 0))
+        # Desglose de requerimientos: qué se cumple y, si no, quién lo impide
+        n_cumple = sum(1 for k in REQUERIMIENTOS if ficha.cumple(k))
+        cuerpo_req = self._acordeon(
+            marco, f"Requerimientos alimentarios: {n_cumple}/{len(REQUERIMIENTOS)} se cumplen",
+            "#43A047" if n_cumple else "#757575")
+
+        tree_req = ttk.Treeview(cuerpo_req, columns=("req", "estado", "culpa"),
+                                show="headings", height=len(REQUERIMIENTOS))
+        tree_req.heading("req", text="Requisito alimentario")
+        tree_req.heading("estado", text="Estado")
+        tree_req.heading("culpa", text="Ingredientes que no cumplen")
+        tree_req.column("req", width=170)
+        tree_req.column("estado", width=110, anchor="center")
+        tree_req.column("culpa", width=380)
+        tree_req.tag_configure("si", foreground="#43A047")
+        tree_req.tag_configure("no", foreground="#C62828")
+        tree_req.pack(fill="x", padx=20)
+        for campo, etiqueta in REQUERIMIENTOS.items():
+            cumple = ficha.cumple(campo)
+            culpables = ", ".join(ficha.requerimientos.get(campo, []))
+            tree_req.insert("", "end", tags=("si" if cumple else "no",),
+                            values=(etiqueta,
+                                    "SÍ CUMPLE" if cumple else "NO CUMPLE",
+                                    "—" if cumple else (culpables or "sin ingredientes")))
 
     def _mostrar_toplevel_nutricional(self, titulo_ventana, nombre_producto,
                                       tabla_100g, tabla_porcion,
@@ -365,32 +420,37 @@ class AppNutricion(tk.Tk):
         top.config(bg=COLOR_BG)
         top.resizable(True, True)
 
-        tk.Label(top, text=nombre_producto, font=FONT_TITULO, bg=COLOR_BG).pack(pady=(14, 2))
+        # Todo el contenido va dentro del frame con scroll: con la lista de
+        # ingredientes y el desglose de requerimientos ya no cabe en pantalla.
+        outer, cuerpo, _ = self._crear_scroll_frame(top)
+        outer.pack(fill="both", expand=True)
+
+        tk.Label(cuerpo, text=nombre_producto, font=FONT_TITULO, bg=COLOR_BG).pack(pady=(14, 2))
 
         # ── Cabecera: información de proceso (humedad separada) ──
         info_proceso = (f"Humedad: {humedad_final_pct:.2f}%  |  "
                         f"Concentración: {merma_pct:.4f}%  |  Factor: ×{factor:.5f}")
-        tk.Label(top, text=info_proceso, font=FONT_PEQUEÑA, bg=COLOR_BG, fg="#555555").pack()
+        tk.Label(cuerpo, text=info_proceso, font=FONT_PEQUEÑA, bg=COLOR_BG, fg="#555555").pack()
 
         crit_txt = "Sí" if critico else "No"
         if critico != critico_auto:
             crit_txt += f"  ⚠️ (auto-detección sugiere {'Sí' if critico_auto else 'No'})"
         info_negocio = f"Crítico: {crit_txt}  |  Costo final: ${costo_kg:,.2f} /kg"
-        tk.Label(top, text=info_negocio, font=FONT_PEQUEÑA, bg=COLOR_BG, fg="#555555").pack()
+        tk.Label(cuerpo, text=info_negocio, font=FONT_PEQUEÑA, bg=COLOR_BG, fg="#555555").pack()
 
         # ── Caducidad en cascada (semanas) + desglose navegable ──
         if caducidad_info:
-            self._construir_desglose_caducidad(top, caducidad_info["prod_id"])
+            self._construir_desglose_caducidad(cuerpo, caducidad_info["prod_id"])
 
-        tk.Frame(top, bg="#BDBDBD", height=1).pack(fill="x", padx=20, pady=8)
+        tk.Frame(cuerpo, bg="#BDBDBD", height=1).pack(fill="x", padx=20, pady=8)
 
         # ── Tabla nutricional con redondeo Minsal ──
-        frame_tree = tk.Frame(top, bg=COLOR_BG)
+        frame_tree = tk.Frame(cuerpo, bg=COLOR_BG)
         frame_tree.pack(fill="both", expand=True, padx=15, pady=(0, 5))
 
         col_p = f"Por {porcion_g:.0f} g"
         tree = ttk.Treeview(frame_tree, columns=("nut", "c100", "cpor"),
-                            show="headings", height=16)
+                            show="headings")
         tree.heading("nut", text="Nutriente")
         tree.heading("c100", text="Por 100 g")
         tree.heading("cpor", text=col_p)
@@ -398,10 +458,7 @@ class AppNutricion(tk.Tk):
         tree.column("c100", width=120, anchor="center")
         tree.column("cpor", width=120, anchor="center")
 
-        sb = ttk.Scrollbar(frame_tree, orient="vertical", command=tree.yview)
-        tree.configure(yscrollcommand=sb.set)
-        tree.pack(side="left", fill="both", expand=True)
-        sb.pack(side="right", fill="y")
+        tree.pack(fill="x", expand=True)
 
         for key in NUTRIENTES:
             label = ETIQUETAS_NUTRIENTES.get(key, key)
@@ -426,14 +483,16 @@ class AppNutricion(tk.Tk):
                     redondear_minsal(mn["cantidad_100g"]),
                     f"{redondear_minsal(mn['cantidad_porcion'])} ({mn['pct_ddr']:.1f}% DDR)"))
 
+        tree.config(height=len(tree.get_children()))
+
         # ── Lista de ingredientes aplanada + alérgenos (RSA Art 107) ──
         if ficha is not None:
-            self._construir_bloque_etiquetado(top, ficha)
+            self._construir_bloque_etiquetado(cuerpo, ficha)
 
         # ── Descriptores nutricionales (RSA Art 120) ──
         if descriptores:
-            tk.Frame(top, bg="#BDBDBD", height=1).pack(fill="x", padx=20, pady=4)
-            frame_desc = tk.Frame(top, bg=COLOR_BG)
+            tk.Frame(cuerpo, bg="#BDBDBD", height=1).pack(fill="x", padx=20, pady=4)
+            frame_desc = tk.Frame(cuerpo, bg=COLOR_BG)
             frame_desc.pack(fill="x", padx=15, pady=(0, 4))
             tk.Label(frame_desc, text="Descriptores Nutricionales (RSA Art 120):",
                      font=FONT_BOLD, bg=COLOR_BG, fg=COLOR_ACENTO).pack(anchor="w")
@@ -443,8 +502,8 @@ class AppNutricion(tk.Tk):
                          font=FONT_NORMAL, bg=COLOR_BG, fg=color).pack(anchor="w")
 
         # ── Sección de sellos / destacadores ──
-        tk.Frame(top, bg="#BDBDBD", height=1).pack(fill="x", padx=20, pady=4)
-        frame_norm = tk.Frame(top, bg=COLOR_BG)
+        tk.Frame(cuerpo, bg="#BDBDBD", height=1).pack(fill="x", padx=20, pady=4)
+        frame_norm = tk.Frame(cuerpo, bg=COLOR_BG)
         frame_norm.pack(fill="x", padx=15, pady=(0, 4))
 
         tk.Label(frame_norm, text="Normativa:", font=FONT_NORMAL, bg=COLOR_BG).pack(side="left")
@@ -457,7 +516,7 @@ class AppNutricion(tk.Tk):
         if normativas:
             combo_norm.current(0)
 
-        frame_sellos = tk.Frame(top, bg=COLOR_BG)
+        frame_sellos = tk.Frame(cuerpo, bg=COLOR_BG)
         frame_sellos.pack(fill="both", expand=False, padx=15, pady=(0, 10))
 
         tree_sellos = ttk.Treeview(frame_sellos,
@@ -958,7 +1017,7 @@ class AppNutricion(tk.Tk):
             messagebox.showerror("Error inesperado", str(exc))
 
     # ══════════════════════════════════════════════════════════════════════════
-    # PRODUCTOS (modelo unificado — SubProductos + Productos Finales)
+    # PRODUCTOS (nodo único del BOM: receta de ingredientes y/o productos)
     # ══════════════════════════════════════════════════════════════════════════
 
     def mostrar_menu_productos(self):
@@ -968,18 +1027,15 @@ class AppNutricion(tk.Tk):
         frame = tk.Frame(self.container, bg=COLOR_BG)
         frame.pack(pady=10)
 
-        self._boton(frame, "🧪  Crear SubProducto",
-                    lambda: self.mostrar_formulario_producto('crear', 'subproducto'),
-                    color_bg=COLOR_ACENTO, color_fg="white").pack(pady=5)
-        self._boton(frame, "🏭  Crear Producto Final",
-                    lambda: self.mostrar_formulario_producto('crear', 'producto_final'),
+        self._boton(frame, "🧪  Crear Producto",
+                    lambda: self.mostrar_formulario_producto('crear'),
                     color_bg=COLOR_ACENTO, color_fg="white").pack(pady=5)
 
         tk.Frame(frame, bg="#BDBDBD", height=1).pack(fill="x", pady=8)
 
         self._boton(frame, "✏️  Editar Producto",
                     lambda: self._seleccionar_prod_y_hacer(
-                        lambda pid: self.mostrar_formulario_producto('editar', None, pid))).pack(pady=5)
+                        lambda pid: self.mostrar_formulario_producto('editar', pid))).pack(pady=5)
         self._boton(frame, "📊  Ver Tabla Nutricional",
                     lambda: self._seleccionar_prod_y_hacer(self._ver_tabla_prod)).pack(pady=5)
         self._boton(frame, "🗑️  Eliminar Producto",
@@ -1015,26 +1071,19 @@ class AppNutricion(tk.Tk):
 
     # ── Formulario crear/editar Producto (unificado) ──────────────────────────
 
-    def mostrar_formulario_producto(self, modo, tipo_prod=None, prod_id=None):
+    def mostrar_formulario_producto(self, modo, prod_id=None):
         self.limpiar_pantalla()
         self._prod_receta_ing: list[dict] = []
         self._prod_receta_prod: list[dict] = []
         self._prod_costos: list[dict] = []
         self._critico_var = tk.BooleanVar(value=False)
 
-        if modo == 'editar' and prod_id:
-            with Session(engine) as s:
-                p = s.get(Producto, prod_id)
-                tipo_prod = p.tipo if p else 'subproducto'
-
-        es_pf = (tipo_prod == "producto_final")
-        label_tipo = "Producto Final" if es_pf else "SubProducto"
-        titulo = f"Nuevo {label_tipo}" if modo == 'crear' else f"Editar {label_tipo}"
+        titulo = "Nuevo Producto" if modo == 'crear' else "Editar Producto"
         self._titulo(self.container, titulo)
 
         self._barra_botones(self.mostrar_menu_productos,
-                            lambda: self._guardar_producto(modo, tipo_prod, prod_id),
-                            f"💾  Guardar {label_tipo}")
+                            lambda: self._guardar_producto(modo, prod_id),
+                            "💾  Guardar Producto")
         self._separador(self.container)
 
         outer, frame_form, _ = self._crear_scroll_frame(self.container)
@@ -1051,11 +1100,10 @@ class AppNutricion(tk.Tk):
             ("descripcion",   "Descripción (opcional):"),
             ("humedad_final", "Humedad final (%, ej: 3.0):"),
         ]
-        if es_pf:
-            campos.extend([
-                ("porcion_g",     "Porción (g, ej: 25):"),
-                ("gramaje_g",     "Gramaje empaque (g, ej: 200):"),
-            ])
+        campos.extend([
+            ("porcion_g",     "Porción (g, ej: 25):"),
+            ("gramaje_g",     "Gramaje empaque (g, ej: 200):"),
+        ])
         campos.append(("semanas_caducidad_override",
                        "Vida útil manual (semanas, opcional):"))
         # Trazas del proceso/línea de este nodo; suben hasta el producto final
@@ -1372,12 +1420,9 @@ class AppNutricion(tk.Tk):
             self._prod_entries["descripcion"].insert(0, p.descripcion or "")
             self._prod_entries["humedad_final"].insert(0, str(round(p.humedad_final * 100.0, 6)))
             self._critico_var.set(p.critico)
-            if "porcion_g" in self._prod_entries:
-                self._prod_entries["porcion_g"].delete(0, tk.END)
-                self._prod_entries["porcion_g"].insert(0, str(p.porcion_g))
-            if "gramaje_g" in self._prod_entries:
-                self._prod_entries["gramaje_g"].delete(0, tk.END)
-                self._prod_entries["gramaje_g"].insert(0, str(p.gramaje_g))
+            for campo in ("porcion_g", "gramaje_g"):
+                self._prod_entries[campo].delete(0, tk.END)
+                self._prod_entries[campo].insert(0, str(getattr(p, campo)))
             self._prod_entries["semanas_caducidad_override"].delete(0, tk.END)
             if p.semanas_caducidad_override is not None:
                 self._prod_entries["semanas_caducidad_override"].insert(
@@ -1407,7 +1452,7 @@ class AppNutricion(tk.Tk):
         self._prod_refrescar_tree_receta_prod()
         self._prod_refrescar_tree_costos()
 
-    def _guardar_producto(self, modo, tipo_prod, prod_id):
+    def _guardar_producto(self, modo, prod_id):
         try:
             nombre = self._prod_entries["nombre"].get().strip()
             desc = self._prod_entries["descripcion"].get().strip()
@@ -1426,7 +1471,6 @@ class AppNutricion(tk.Tk):
                 raise ValueError(
                     f"Los porcentajes deben sumar 100%.\nTotal actual: {total_pct:.4f}%")
 
-            es_pf = (tipo_prod == "producto_final")
             porcion_g = 25.0
             gramaje_g = 200.0
             semanas_ov = None
@@ -1434,17 +1478,14 @@ class AppNutricion(tk.Tk):
             if sv:
                 semanas_ov = int(sv)
             trazas = self._prod_entries["trazas"].get().strip() or None
-            if es_pf:
-                p_str = self._prod_entries.get("porcion_g")
-                g_str = self._prod_entries.get("gramaje_g")
-                if p_str:
-                    porcion_g = float(p_str.get().strip().replace(",", ".") or "25")
-                if g_str:
-                    gramaje_g = float(g_str.get().strip().replace(",", ".") or "200")
+            porcion_g = float(
+                self._prod_entries["porcion_g"].get().strip().replace(",", ".") or "25")
+            gramaje_g = float(
+                self._prod_entries["gramaje_g"].get().strip().replace(",", ".") or "200")
 
             with Session(engine) as s:
                 if modo == "crear":
-                    p = Producto(nombre=nombre, descripcion=desc, tipo=tipo_prod,
+                    p = Producto(nombre=nombre, descripcion=desc,
                                 humedad_final=humedad_f, critico=critico,
                                 porcion_g=porcion_g, gramaje_g=gramaje_g,
                                 semanas_caducidad_override=semanas_ov,

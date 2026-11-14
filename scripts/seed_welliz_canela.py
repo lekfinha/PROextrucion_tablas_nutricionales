@@ -378,7 +378,7 @@ def main():
         s.flush()
         print(f"  [OK]   Catálogo DDR RSA Chile verificado/insertado ({len(DDR_RSA_CHILE)} micronutrientes)")
 
-        # ── 3. Insertar SubProductos (Producto tipo='subproducto') ─────────────
+        # ── 3. Insertar los Productos componentes ─────────────────────────────
         sp_map: dict[str, int] = {}    # nombre → id
         for sp_datos in SUBPRODUCTOS:
             if not sp_datos["receta"]:
@@ -396,7 +396,6 @@ def main():
             sp = Producto(
                 nombre=sp_datos["nombre"],
                 descripcion=sp_datos["descripcion"],
-                tipo="subproducto",
                 humedad_final=sp_datos["humedad_final"],
                 critico=sp_datos["critico"],
             )
@@ -432,7 +431,7 @@ def main():
             print(f"  [OK]   Producto (subproducto) insertado: {sp_datos['nombre']} "
                   f"({len(sp_datos['receta'])} ingredientes, {len(sp_datos['costos'])} costos)")
 
-        # ── 4. Insertar PT Granel (Producto tipo='producto_final') ────────────
+        # ── 4. Insertar PT Granel (Producto que compone a los anteriores) ─────
         existente_pf = (s.query(Producto)
                          .filter_by(nombre=PT_GRANEL["nombre"])
                          .first())
@@ -442,7 +441,6 @@ def main():
             pf = Producto(
                 nombre=PT_GRANEL["nombre"],
                 descripcion=PT_GRANEL["descripcion"],
-                tipo="producto_final",
                 porcion_g=PT_GRANEL["porcion_g"],
                 gramaje_g=PT_GRANEL["gramaje_g"],
                 humedad_final=PT_GRANEL["humedad_final"],

@@ -205,15 +205,13 @@ class CostoOperativo(Base):
 
 class Producto(Base):
     """
-    Nodo del árbol BOM. Puede ser un SubProducto intermedio o un
-    Producto Final terminado. La lógica matemática es idéntica para ambos.
-
-    Un Producto puede estar compuesto por:
+    No hay distinción entre producto intermedio y producto terminado: un
+    Producto es un Producto, y cualquiera puede etiquetarse o usarse como
+    componente de otro. Su receta mezcla libremente:
     - Ingredientes puros (vía receta_ingredientes)
     - Otros Productos (vía receta_productos) — composición recursiva
 
     Atributos clave:
-    - tipo: "subproducto" | "producto_final" (solo afecta la UI, no la lógica)
     - humedad_final: fracción (0.0–1.0) de humedad post-proceso
     - critico: bool — afecta sellos de advertencia. Auto-detectable.
     """
@@ -223,10 +221,9 @@ class Producto(Base):
                                     autoincrement=True)
     nombre: Mapped[str] = mapped_column(String, nullable=False, unique=True)
     descripcion: Mapped[str | None] = mapped_column(Text, default="")
-    tipo: Mapped[str] = mapped_column(String, default="subproducto")
     critico: Mapped[bool] = mapped_column(Boolean, default=False)
 
-    # Datos de etiquetado (relevante para tipo="producto_final")
+    # Datos de etiquetado
     porcion_g: Mapped[float] = mapped_column(Float, default=25.0)
     gramaje_g: Mapped[float] = mapped_column(Float, default=200.0)
 
@@ -569,5 +566,4 @@ class Producto(Base):
     # ══════════════════════════════════════════════════════════════════════════
 
     def __repr__(self) -> str:
-        return (f"<Producto id={self.id} tipo='{self.tipo}' "
-                f"nombre='{self.nombre}'>")
+        return f"<Producto id={self.id} nombre='{self.nombre}'>"
