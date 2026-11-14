@@ -14,6 +14,8 @@ from src.models.producto import (Producto, RecetaIngrediente, RecetaProducto,
 from src.models.micronutriente import (Micronutriente, ProductoMicronutriente,
                                         IngredienteMicronutriente)
 from src.normativas import calcular_sellos, listar_normativas, NORMATIVAS_DISPONIBLES
+from src.etiquetado import (consolidar_etiquetado, DECLARABLES, REQUERIMIENTOS,
+                            TIPO_COLORANTE)
 from src.utils.redondeo import redondear_minsal
 
 # ── Paleta y fuentes ───────────────────────────────────────────────────────────
@@ -66,6 +68,9 @@ class AppNutricion(tk.Tk):
         self._campos_en_fraccion = {"humedad_porcentaje"}
 
         self.entries: dict[str, tk.Entry] = {}
+        # Checkboxes de etiquetado del ingrediente: {código → BooleanVar}
+        self._alergeno_vars: dict[str, tk.BooleanVar] = {}
+        self._req_vars: dict[str, tk.BooleanVar] = {}
         # Entries de micronutrientes del ingrediente: {micronutriente_id: Entry}
         self._entries_micro: dict[int, tk.Entry] = {}
         self._nombres_micro: dict[int, str] = {}
@@ -86,6 +91,8 @@ class AppNutricion(tk.Tk):
         for w in self.container.winfo_children():
             w.destroy()
         self.entries.clear()
+        self._alergeno_vars.clear()
+        self._req_vars.clear()
         self._entries_micro.clear()
         self._nombres_micro.clear()
         self.ingrediente_actual_id = None
@@ -278,6 +285,71 @@ class AppNutricion(tk.Tk):
         if expandido:
             alternar()
 
+    def _construir_bloque_etiquetado(self, parent, ficha):
+        """
+        Lista de ingredientes aplanada, «Contiene:» en negrilla y cuerpo mayor,
+        trazas en párrafo aparte y requerimientos cumplidos. El desglose se
+        despliega al hacer clic, igual que el de caducidad.
+        """
+        tk.Frame(parent, bg="#BDBDBD", height=1).pack(fill="x", padx=20, pady=4)
+        marco = tk.Frame(parent, bg=COLOR_BG)
+        marco.pack(fill="x", padx=15, pady=(0, 4))
+
+        resumen = (f"Ingredientes (RSA Art 107): {len(ficha.ingredientes)} "
+                   f"materias primas — total {ficha.total_porcentaje:.2f}%")
+        color = COLOR_WARN if abs(ficha.total_porcentaje - 100.0) > 0.01 else "#555555"
+        lbl = tk.Label(marco, text="▶ " + resumen, font=FONT_BOLD, bg=COLOR_BG,
+                       fg=color, cursor="hand2")
+        lbl.pack(anchor="w")
+
+        cuerpo = tk.Frame(marco, bg=COLOR_BG)
+        estado = {"abierto": False}
+
+        def alternar(_event=None):
+            estado["abierto"] = not estado["abierto"]
+            if estado["abierto"]:
+                cuerpo.pack(fill="x", after=lbl)
+            else:
+                cuerpo.pack_forget()
+            lbl.config(text=("▼ " if estado["abierto"] else "▶ ") + resumen)
+
+        lbl.bind("<Button-1>", alternar)
+
+        tree = ttk.Treeview(cuerpo, columns=("ing", "pct", "al"),
+                            show="headings",
+                            height=min(max(len(ficha.ingredientes), 2), 10))
+        tree.heading("ing", text="Ingrediente (↓ mayor cantidad)")
+        tree.heading("pct", text="%")
+        tree.heading("al", text="Declara")
+        tree.column("ing", width=380)
+        tree.column("pct", width=80, anchor="center")
+        tree.column("al", width=200)
+        tree.tag_configure("con_alergeno", foreground="#C62828")
+        tree.pack(fill="x", padx=20)
+        for linea in ficha.ingredientes:
+            marcas = ", ".join(DECLARABLES.get(c, (c, ""))[0] for c in linea.alergenos)
+            tree.insert("", "end", values=(linea.nombre, f"{linea.porcentaje:.3f}", marcas),
+                        tags=("con_alergeno",) if marcas else ())
+
+        # «Contiene:» — negrilla y cuerpo mayor, como exige la rotulación
+        for texto in (ficha.texto_contiene(), ficha.texto_colorantes()):
+            if texto:
+                tk.Label(marco, text=texto, font=("Segoe UI", 12, "bold"),
+                         bg=COLOR_BG, fg="#C62828", wraplength=680,
+                         justify="left").pack(anchor="w", pady=(4, 0))
+
+        if ficha.trazas_advertencias:
+            tk.Label(marco, text=ficha.texto_trazas(), font=FONT_NORMAL,
+                     bg=COLOR_BG, fg="#555555", wraplength=680,
+                     justify="left").pack(anchor="w", pady=(2, 0))
+
+        cumple = [REQUERIMIENTOS[k] for k, v in ficha.requerimientos.items() if v]
+        tk.Label(marco,
+                 text=("Requerimientos: " + ", ".join(cumple)) if cumple
+                      else "Requerimientos: ninguno se cumple en el 100% de las materias primas",
+                 font=FONT_PEQUEÑA, bg=COLOR_BG,
+                 fg="#43A047" if cumple else "#757575").pack(anchor="w", pady=(2, 0))
+
     def _mostrar_toplevel_nutricional(self, titulo_ventana, nombre_producto,
                                       tabla_100g, tabla_porcion,
                                       porcion_g, merma_pct, factor, costo_kg,
@@ -285,7 +357,8 @@ class AppNutricion(tk.Tk):
                                       humedad_final_pct=0.0,
                                       micronutrientes=None,
                                       descriptores=None,
-                                      caducidad_info=None):
+                                      caducidad_info=None,
+                                      ficha=None):
         top = tk.Toplevel(self)
         top.title(titulo_ventana)
         top.geometry("740x900")
@@ -352,6 +425,10 @@ class AppNutricion(tk.Tk):
                     label,
                     redondear_minsal(mn["cantidad_100g"]),
                     f"{redondear_minsal(mn['cantidad_porcion'])} ({mn['pct_ddr']:.1f}% DDR)"))
+
+        # ── Lista de ingredientes aplanada + alérgenos (RSA Art 107) ──
+        if ficha is not None:
+            self._construir_bloque_etiquetado(top, ficha)
 
         # ── Descriptores nutricionales (RSA Art 120) ──
         if descriptores:
@@ -559,8 +636,64 @@ class AppNutricion(tk.Tk):
         self._e_meses_cad = tk.Entry(row_mc, font=FONT_NORMAL, relief="solid", bd=1)
         self._e_meses_cad.pack(side="right", expand=True, fill="x")
 
+        # ── Alérgenos, colorantes, trazas y requerimientos ────────────────────
+        self._construir_seccion_etiquetado(frame_form)
+
         # ── Micronutrientes nativos (vitaminas y minerales por 100g) ──────────
         self._construir_seccion_micronutrientes(frame_form)
+
+    def _construir_seccion_etiquetado(self, frame_form):
+        """
+        Declaraciones de la ficha técnica que el producto final hereda:
+        alérgenos y colorantes destacados (unión), advertencia de trazas
+        (propagación) y requerimientos alimentarios (intersección).
+        """
+        self._separador(frame_form)
+        tk.Label(frame_form, text="Alérgenos y colorantes destacados",
+                 font=FONT_BOLD, bg=COLOR_BG).pack(anchor="w", padx=4)
+        tk.Label(frame_form,
+                 text=("Marcar solo lo que la ficha técnica declara como presente.\n"
+                       "Se imprimen en negrilla bajo «Contiene:» en la etiqueta."),
+                 font=FONT_PEQUEÑA, bg=COLOR_BG, fg="#757575",
+                 justify="left").pack(anchor="w", padx=4, pady=(0, 4))
+
+        grid = tk.Frame(frame_form, bg=COLOR_BG)
+        grid.pack(fill="x", padx=4)
+        for i, (codigo, (nombre, tipo)) in enumerate(DECLARABLES.items()):
+            var = tk.BooleanVar(value=False)
+            self._alergeno_vars[codigo] = var
+            tk.Checkbutton(grid, text=f"  {nombre}", variable=var,
+                           font=FONT_NORMAL, bg=COLOR_BG,
+                           fg=("#C62828" if tipo == TIPO_COLORANTE else COLOR_TEXTO),
+                           selectcolor="#FFFFFF", activebackground=COLOR_BG,
+                           anchor="w").grid(row=i // 2, column=i % 2,
+                                            sticky="w", padx=4)
+
+        row_tz = tk.Frame(frame_form, bg=COLOR_BG)
+        row_tz.pack(fill="x", pady=(8, 3), padx=4)
+        tk.Label(row_tz, text="Trazas / contaminación:", font=FONT_NORMAL,
+                 bg=COLOR_BG, width=26, anchor="w").pack(side="left")
+        self._e_trazas = tk.Entry(row_tz, font=FONT_NORMAL, relief="solid", bd=1)
+        self._e_trazas.pack(side="right", expand=True, fill="x")
+        tk.Label(frame_form, text='Frase tal como se imprimirá. Ej: "Puede contener maní."',
+                 font=FONT_PEQUEÑA, bg=COLOR_BG, fg="#757575").pack(anchor="w", padx=4)
+
+        tk.Label(frame_form, text="Requerimientos alimentarios",
+                 font=FONT_BOLD, bg=COLOR_BG).pack(anchor="w", padx=4, pady=(10, 0))
+        tk.Label(frame_form,
+                 text="El producto final los hereda solo si TODAS sus materias primas los cumplen.",
+                 font=FONT_PEQUEÑA, bg=COLOR_BG, fg="#757575").pack(anchor="w", padx=4)
+
+        grid_req = tk.Frame(frame_form, bg=COLOR_BG)
+        grid_req.pack(fill="x", padx=4, pady=(2, 0))
+        for i, (campo, etiqueta) in enumerate(REQUERIMIENTOS.items()):
+            var = tk.BooleanVar(value=False)
+            self._req_vars[campo] = var
+            tk.Checkbutton(grid_req, text=f"  {etiqueta}", variable=var,
+                           font=FONT_NORMAL, bg=COLOR_BG, fg=COLOR_TEXTO,
+                           selectcolor="#FFFFFF", activebackground=COLOR_BG,
+                           anchor="w").grid(row=i // 2, column=i % 2,
+                                            sticky="w", padx=4)
 
     def _construir_seccion_micronutrientes(self, frame_form):
         """
@@ -648,6 +781,15 @@ class AppNutricion(tk.Tk):
             self._e_meses_cad.delete(0, tk.END)
             if ing.semanas_caducidad is not None:
                 self._e_meses_cad.insert(0, str(ing.semanas_caducidad))
+            # Etiquetado
+            codigos_decl = set(ing.alergenos or [])
+            for codigo, var in self._alergeno_vars.items():
+                var.set(codigo in codigos_decl)
+            for campo, var in self._req_vars.items():
+                var.set(bool(getattr(ing, campo, False)))
+            self._e_trazas.delete(0, tk.END)
+            if ing.trazas:
+                self._e_trazas.insert(0, ing.trazas)
             # Micronutrientes nativos: queda en blanco lo que el ingrediente no declara
             declarados = {im.micronutriente_id: im.cantidad_100g
                           for im in ing.micronutrientes}
@@ -730,6 +872,12 @@ class AppNutricion(tk.Tk):
             datos["semanas_caducidad"] = None
             if mc_str:
                 datos["semanas_caducidad"] = int(mc_str)
+
+            # Etiquetado (lista nueva: la columna JSON no detecta mutaciones)
+            datos["alergenos"] = [c for c, v in self._alergeno_vars.items() if v.get()]
+            datos["trazas"] = self._e_trazas.get().strip() or None
+            for campo, var in self._req_vars.items():
+                datos[campo] = var.get()
 
             micros = self._leer_micronutrientes_formulario()
 
@@ -910,6 +1058,8 @@ class AppNutricion(tk.Tk):
             ])
         campos.append(("semanas_caducidad_override",
                        "Vida útil manual (semanas, opcional):"))
+        # Trazas del proceso/línea de este nodo; suben hasta el producto final
+        campos.append(("trazas", "Trazas de la línea (opcional):"))
 
         defaults = {"porcion_g": "25", "gramaje_g": "200"}
         for key, label in campos:
@@ -1232,6 +1382,9 @@ class AppNutricion(tk.Tk):
             if p.semanas_caducidad_override is not None:
                 self._prod_entries["semanas_caducidad_override"].insert(
                     0, str(p.semanas_caducidad_override))
+            self._prod_entries["trazas"].delete(0, tk.END)
+            if p.trazas:
+                self._prod_entries["trazas"].insert(0, p.trazas)
             for rel in p.receta_ingredientes:
                 self._prod_receta_ing.append({
                     "ing_id": rel.ingrediente_id,
@@ -1280,6 +1433,7 @@ class AppNutricion(tk.Tk):
             sv = self._prod_entries["semanas_caducidad_override"].get().strip()
             if sv:
                 semanas_ov = int(sv)
+            trazas = self._prod_entries["trazas"].get().strip() or None
             if es_pf:
                 p_str = self._prod_entries.get("porcion_g")
                 g_str = self._prod_entries.get("gramaje_g")
@@ -1293,7 +1447,8 @@ class AppNutricion(tk.Tk):
                     p = Producto(nombre=nombre, descripcion=desc, tipo=tipo_prod,
                                 humedad_final=humedad_f, critico=critico,
                                 porcion_g=porcion_g, gramaje_g=gramaje_g,
-                                semanas_caducidad_override=semanas_ov)
+                                semanas_caducidad_override=semanas_ov,
+                                trazas=trazas)
                     s.add(p)
                     s.flush()
                 else:
@@ -1305,6 +1460,7 @@ class AppNutricion(tk.Tk):
                     p.porcion_g = porcion_g
                     p.gramaje_g = gramaje_g
                     p.semanas_caducidad_override = semanas_ov
+                    p.trazas = trazas
                     p.receta_ingredientes = []
                     p.receta_productos = []
                     p.costos_operativos = []
@@ -1344,6 +1500,7 @@ class AppNutricion(tk.Tk):
                 humedad_pct  = p_l.humedad_final * 100.0
                 micros       = p_l.tabla_micronutrientes_filtrada()
                 descs        = p_l.evaluar_descriptores_micronutrientes()
+                ficha        = consolidar_etiquetado(p_l)
 
                 cad_info = {
                     "prod_id": p.id,
@@ -1361,7 +1518,7 @@ class AppNutricion(tk.Tk):
                 porcion_final, merma_pct, factor, costo_kg,
                 critico=critico_p, critico_auto=critico_auto,
                 humedad_final_pct=humedad_pct, micronutrientes=micros,
-                descriptores=descs, caducidad_info=cad_info)
+                descriptores=descs, caducidad_info=cad_info, ficha=ficha)
             self.mostrar_menu_productos()
 
         except ValueError as exc:
@@ -1390,6 +1547,7 @@ class AppNutricion(tk.Tk):
                 humedad_pct  = p.humedad_final * 100.0
                 micros       = p.tabla_micronutrientes_filtrada()
                 descs        = p.evaluar_descriptores_micronutrientes()
+                ficha        = consolidar_etiquetado(p)
 
                 cad_info = {
                     "prod_id": prod_id,
@@ -1403,7 +1561,7 @@ class AppNutricion(tk.Tk):
                 nombre, tabla_100g, tabla_p, porcion_g, merma_pct, factor, costo,
                 critico=critico, critico_auto=critico_auto,
                 humedad_final_pct=humedad_pct, micronutrientes=micros,
-                descriptores=descs, caducidad_info=cad_info)
+                descriptores=descs, caducidad_info=cad_info, ficha=ficha)
             self.mostrar_menu_productos()
         except Exception as exc:
             messagebox.showerror("Error", str(exc))

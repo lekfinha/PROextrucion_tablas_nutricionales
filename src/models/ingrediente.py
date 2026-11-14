@@ -1,7 +1,8 @@
 from datetime import datetime, date
 from typing import TYPE_CHECKING
 
-from sqlalchemy import String, Float, Integer, Boolean, DateTime, Date, UniqueConstraint
+from sqlalchemy import (String, Float, Integer, Boolean, DateTime, Date, JSON,
+                        Text, UniqueConstraint)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from src.database import Base
 
@@ -40,6 +41,24 @@ class Ingrediente(Base):
     # Vida útil de la materia prima, en semanas (hoja del árbol de caducidad)
     semanas_caducidad: Mapped[int | None] = mapped_column(
         Integer, nullable=True, default=None)
+
+    # ── Etiquetado: alérgenos, colorantes y requerimientos ───────────────────
+    # Códigos del catálogo src.etiquetado.DECLARABLES (alérgenos oficiales y
+    # colorantes de rotulación destacada). Reasignar la lista completa al
+    # editar — SQLAlchemy no detecta mutaciones in-place de una columna JSON.
+    alergenos: Mapped[list[str]] = mapped_column(
+        JSON, default=list, nullable=False, server_default="'[]'")
+    # Advertencia de contaminación cruzada, tal como irá impresa.
+    # Ej: "Puede contener maní." / "Elaborado en líneas que procesan leche."
+    trazas: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+
+    # Requerimientos alimentarios. El producto final solo los hereda si TODAS
+    # sus materias primas los cumplen, por eso el default conservador es False.
+    halal:         Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    kosher:        Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    vegetariano:   Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    vegano:        Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    apto_celiacos: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
 
     # ── Calorías y Proteínas ──────────────────────────────────────────────────
     energia_kcal: Mapped[float] = mapped_column(Float, default=0.0)

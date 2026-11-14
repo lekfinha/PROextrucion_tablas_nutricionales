@@ -233,6 +233,10 @@ class Producto(Base):
     # Humedad final post-proceso como fracción (ej: 0.03 = 3%)
     humedad_final: Mapped[float] = mapped_column(Float, default=0.0)
 
+    # Riesgo de contaminación cruzada propio del proceso o la línea donde se
+    # elabora este nodo. Sube hasta la raíz igual que el de los ingredientes.
+    trazas: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+
     # Trazabilidad
     fecha_creacion: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.now, nullable=False)

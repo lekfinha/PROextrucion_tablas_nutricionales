@@ -1,4 +1,4 @@
-from src.database import engine, Base
+from src.database import engine, Base, migrar_columnas_faltantes
 
 # Importar TODOS los modelos para que Base.metadata los registre
 # y create_all() cree sus tablas en data/nutricion.db
@@ -20,6 +20,10 @@ from src.ui.app import AppNutricion
 def inicializar_sistema():
     # Crea todas las tablas que no existen aún en data/nutricion.db
     Base.metadata.create_all(engine)
+    # ...y agrega las columnas nuevas a las tablas que ya existían
+    nuevas = migrar_columnas_faltantes()
+    if nuevas:
+        print("Columnas agregadas a la base de datos:", ", ".join(nuevas))
 
     # Iniciar la interfaz gráfica
     app = AppNutricion()
