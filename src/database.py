@@ -98,3 +98,34 @@ def migrar_columnas_faltantes() -> list[str]:
                 con.exec_driver_sql(sql)
                 agregadas.append(f"{tabla.name}.{col.name}")
     return agregadas
+
+
+def sincronizar_catalogo_micronutrientes() -> list[str]:
+    """
+    Asegura que data/nutricion.db tenga todas las entradas del catálogo de
+    referencia DDR_RSA_CHILE. Antes solo se cargaba al correr
+    scripts/seed_welliz_canela.py — si el catálogo gana una entrada nueva
+    (ej. Potasio) en una versión posterior, una base ya en uso se quedaba
+    sin ella hasta que alguien recordara re-correr el script de demo. Las
+    entradas existentes no se tocan; import diferido para evitar el ciclo
+    database → micronutriente → database.
+    """
+    from src.models.micronutriente import DDR_RSA_CHILE
+
+    agregados: list[str] = []
+    with engine.begin() as con:
+        tabla_existe = con.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='micronutrientes'"
+        ).first()
+        if not tabla_existe:
+            return agregados                  # tabla nueva: la puebla create_all + este mismo paso después
+        existentes = {fila[0] for fila in
+                      con.exec_driver_sql("SELECT nombre FROM micronutrientes")}
+        for datos in DDR_RSA_CHILE:
+            if datos["nombre"] in existentes:
+                continue
+            con.exec_driver_sql(
+                "INSERT INTO micronutrientes (nombre, unidad, ddr) VALUES (?, ?, ?)",
+                (datos["nombre"], datos["unidad"], datos["ddr"]))
+            agregados.append(datos["nombre"])
+    return agregados

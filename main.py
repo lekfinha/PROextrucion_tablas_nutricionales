@@ -1,4 +1,5 @@
-from src.database import engine, Base, migrar_columnas_faltantes
+from src.database import (engine, Base, migrar_columnas_faltantes,
+                          sincronizar_catalogo_micronutrientes)
 
 # Importar TODOS los modelos para que Base.metadata los registre
 # y create_all() cree sus tablas en data/nutricion.db
@@ -24,6 +25,9 @@ def inicializar_sistema():
     nuevas = migrar_columnas_faltantes()
     if nuevas:
         print("Columnas agregadas a la base de datos:", ", ".join(nuevas))
+    nuevos_micros = sincronizar_catalogo_micronutrientes()
+    if nuevos_micros:
+        print("Micronutrientes agregados al catálogo:", ", ".join(nuevos_micros))
 
     # Iniciar la interfaz gráfica
     app = AppNutricion()

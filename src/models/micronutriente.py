@@ -140,6 +140,7 @@ DDR_RSA_CHILE: list[dict] = [
     {"nombre": "Fósforo",                    "unidad": "mg",  "ddr": 800.0},   # Codex
     {"nombre": "Yodo",                       "unidad": "µg",  "ddr": 150.0},   # Codex
     {"nombre": "Magnesio",                   "unidad": "mg",  "ddr": 300.0},   # Codex
+    {"nombre": "Potasio",                    "unidad": "mg",  "ddr": 4700.0},  # FDA RDI
     {"nombre": "Zinc",                       "unidad": "mg",  "ddr": 15.0},    # Codex
     {"nombre": "Selenio",                    "unidad": "µg",  "ddr": 55.0},    # FDA RDI
     {"nombre": "Cobre",                      "unidad": "mg",  "ddr": 0.9},     # FDA RDI

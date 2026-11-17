@@ -17,9 +17,9 @@ from src.models.micronutriente import (Micronutriente, ProductoMicronutriente,
                                         IngredienteMicronutriente)
 from src.normativas import calcular_sellos, listar_normativas
 from src.etiquetado import (consolidar_etiquetado, DECLARABLES, SIN_CODES,
-                            REQUERIMIENTOS, TIPO_ALERGENO, TIPO_COLORANTE,
-                            TIPO_EDULCORANTE, TIPO_POLIALCOHOL,
-                            TIPO_ADVERTENCIA, TIPO_TRAZA)
+                            REQUERIMIENTOS, CODIGOS_FENILALANINA,
+                            TIPO_ALERGENO, TIPO_COLORANTE, TIPO_EDULCORANTE,
+                            TIPO_POLIALCOHOL, TIPO_ADVERTENCIA, TIPO_TRAZA)
 from src.utils.redondeo import redondear_minsal
 
 # ── Paleta y fuentes ───────────────────────────────────────────────────────────
@@ -740,10 +740,14 @@ class AppNutricion(tk.Tk):
                     font=FONT_PEQUEÑA, bg=COLOR_BG, fg="#757575").pack(anchor="w", padx=15)
 
             self._separador(self.container)
-            outer, cuerpo, _ = self._crear_scroll_frame(self.container)
-            outer.pack(fill="both", expand=True, padx=10)
+            notebook = ttk.Notebook(self.container)
+            notebook.pack(fill="both", expand=True, padx=10, pady=(0, 6))
 
-            lf = tk.LabelFrame(cuerpo, text=" Información General ", bg=COLOR_BG,
+            # ── Pestaña 1: General y Macronutrientes ──
+            tab1_outer, tab1, _ = self._crear_scroll_frame(notebook)
+            notebook.add(tab1_outer, text="General y Macronutrientes")
+
+            lf = tk.LabelFrame(tab1, text=" Información General ", bg=COLOR_BG,
                                font=FONT_NORMAL, fg=COLOR_TEXTO)
             lf.pack(fill="x", padx=5, pady=5)
             info = [
@@ -763,7 +767,7 @@ class AppNutricion(tk.Tk):
                 tk.Label(fila, text=valor, font=FONT_NORMAL, bg=COLOR_BG,
                         anchor="w").pack(side="left")
 
-            lf2 = tk.LabelFrame(cuerpo, text=" Tabla Nutricional Base (por 100 g) ",
+            lf2 = tk.LabelFrame(tab1, text=" Tabla Nutricional Base (por 100 g) ",
                                bg=COLOR_BG, font=FONT_NORMAL, fg=COLOR_TEXTO)
             lf2.pack(fill="x", padx=5, pady=5)
             tree_nut = ttk.Treeview(lf2, columns=("nut", "val"), show="headings",
@@ -778,7 +782,40 @@ class AppNutricion(tk.Tk):
                     ETIQUETAS_NUTRIENTES.get(key, key),
                     redondear_minsal(getattr(ing, key, 0.0))))
 
-            lf3 = tk.LabelFrame(cuerpo,
+            # ── Pestaña 2: Micronutrientes declarados ──
+            tab2_outer, tab2, _ = self._crear_scroll_frame(notebook)
+            notebook.add(tab2_outer, text="Micronutrientes")
+            declarados = sorted(
+                (im for im in ing.micronutrientes if im.cantidad_100g > 0),
+                key=lambda im: im.micronutriente.nombre)
+            if not declarados:
+                tk.Label(tab2, text="— No hay micronutrientes declarados —",
+                        font=FONT_NORMAL, bg=COLOR_BG, fg="#757575").pack(
+                            anchor="w", padx=8, pady=10)
+            else:
+                tree_mic = ttk.Treeview(tab2, columns=("nombre", "cant", "unidad", "ddr"),
+                                        show="headings", height=len(declarados))
+                tree_mic.heading("nombre", text="Micronutriente")
+                tree_mic.heading("cant", text="Por 100 g")
+                tree_mic.heading("unidad", text="Unidad")
+                tree_mic.heading("ddr", text="% DDR / 100 g")
+                tree_mic.column("nombre", width=260)
+                tree_mic.column("cant", width=110, anchor="center")
+                tree_mic.column("unidad", width=90, anchor="center")
+                tree_mic.column("ddr", width=120, anchor="center")
+                tree_mic.pack(fill="x", padx=8, pady=8)
+                for im in declarados:
+                    micro = im.micronutriente
+                    pct_ddr = (im.cantidad_100g / micro.ddr * 100.0) if micro.ddr else 0.0
+                    tree_mic.insert("", "end", values=(
+                        micro.nombre, redondear_minsal(im.cantidad_100g),
+                        micro.unidad, f"{pct_ddr:.1f}%"))
+
+            # ── Pestaña 3: Alérgenos, Aditivos y Requerimientos ──
+            tab3_outer, tab3, _ = self._crear_scroll_frame(notebook)
+            notebook.add(tab3_outer, text="Alérgenos, Aditivos y Requerimientos")
+
+            lf3 = tk.LabelFrame(tab3,
                                 text=" Alérgenos, Colorantes, Edulcorantes y Polialcoholes ",
                                 bg=COLOR_BG, font=FONT_NORMAL, fg=COLOR_TEXTO)
             lf3.pack(fill="x", padx=5, pady=5)
@@ -793,8 +830,11 @@ class AppNutricion(tk.Tk):
                     nombre, tipo = DECLARABLES.get(codigo, (codigo, TIPO_ALERGENO))
                     sin = SIN_CODES.get(codigo)
                     texto = f"• {nombre}" + (f" (SIN {sin})" if sin else "")
+                    color = "#B71C1C" if codigo in CODIGOS_FENILALANINA else colores_tipo.get(tipo, COLOR_TEXTO)
+                    if codigo in CODIGOS_FENILALANINA:
+                        texto += "  ⚠ activa: FENILCETONÚRICOS: CONTIENE FENILALANINA"
                     tk.Label(lf3, text=texto, font=FONT_NORMAL, bg=COLOR_BG,
-                            fg=colores_tipo.get(tipo, COLOR_TEXTO)).pack(anchor="w", padx=8)
+                            fg=color).pack(anchor="w", padx=8)
             if ing.cafeina_taurina:
                 tk.Label(lf3, text="• Cafeína añadida / Taurina", font=FONT_NORMAL,
                         bg=COLOR_BG, fg="#B71C1C").pack(anchor="w", padx=8, pady=(4, 0))
@@ -803,20 +843,30 @@ class AppNutricion(tk.Tk):
                         bg=COLOR_BG, fg="#555555", wraplength=640,
                         justify="left").pack(anchor="w", padx=8, pady=(6, 4))
 
-            lf4 = tk.LabelFrame(cuerpo, text=" Requerimientos Alimentarios ", bg=COLOR_BG,
+            lf4 = tk.LabelFrame(tab3, text=" Requerimientos Alimentarios ", bg=COLOR_BG,
                                font=FONT_NORMAL, fg=COLOR_TEXTO)
             lf4.pack(fill="x", padx=5, pady=5)
-            for campo, etiqueta in REQUERIMIENTOS.items():
-                cumple = bool(getattr(ing, campo, False))
-                fila = tk.Frame(lf4, bg=COLOR_BG)
-                fila.pack(fill="x", padx=8, pady=2)
-                tk.Label(fila, text=etiqueta, font=FONT_NORMAL, bg=COLOR_BG,
-                        width=20, anchor="w").pack(side="left")
-                tk.Label(fila, text="Sí" if cumple else "No", font=FONT_NORMAL, bg=COLOR_BG,
-                        fg="#43A047" if cumple else "#757575").pack(side="left")
+            cumplidos = [etq for campo, etq in REQUERIMIENTOS.items()
+                        if getattr(ing, campo, False)]
+            no_cumplidos = [etq for campo, etq in REQUERIMIENTOS.items()
+                           if not getattr(ing, campo, False)]
+            fila_badges = tk.Frame(lf4, bg=COLOR_BG)
+            fila_badges.pack(fill="x", padx=8, pady=(8, 2))
+            if cumplidos:
+                for etq in cumplidos:
+                    tk.Label(fila_badges, text=f" ✓ {etq} ", font=FONT_BOLD,
+                            bg="#E8F5E9", fg="#2E7D32", relief="solid", bd=1,
+                            padx=6, pady=3).pack(side="left", padx=3, pady=2)
+            else:
+                tk.Label(fila_badges, text="— No cumple ningún requerimiento —",
+                        font=FONT_NORMAL, bg=COLOR_BG, fg="#757575").pack(anchor="w")
+            if no_cumplidos:
+                tk.Label(lf4, text="No cumple: " + ", ".join(no_cumplidos),
+                        font=FONT_PEQUEÑA, bg=COLOR_BG, fg="#9E9E9E").pack(
+                            anchor="w", padx=8, pady=(2, 8))
 
-            self._boton(cuerpo, "← Volver al Explorador", self.mostrar_menu_principal,
-                        ancho=28).pack(pady=12)
+            self._boton(self.container, "← Volver al Explorador", self.mostrar_menu_principal,
+                        ancho=28).pack(pady=10)
 
     def mostrar_detalle_producto(self, prod_id):
         self.limpiar_pantalla()
@@ -925,11 +975,17 @@ class AppNutricion(tk.Tk):
                             "💾  Guardar Ingrediente")
         self._separador(self.container)
 
-        outer, frame_form, _ = self._crear_scroll_frame(self.container)
-        outer.pack(fill="both", expand=True, padx=20)
+        # 3 pestañas — ttk.Notebook crea los tres frames de una sola vez y
+        # solo cambia cuál se muestra, así que el estado de las otras dos no
+        # se pierde al navegar entre ellas (no hay que guardarlo a mano).
+        notebook = ttk.Notebook(self.container)
+        notebook.pack(fill="both", expand=True, padx=20, pady=(0, 10))
 
-        # Checkbox Crítico
-        row_crit = tk.Frame(frame_form, bg=COLOR_BG)
+        # ── Pestaña 1: General y Macronutrientes ──
+        tab1_outer, tab1, _ = self._crear_scroll_frame(notebook)
+        notebook.add(tab1_outer, text="General y Macronutrientes")
+
+        row_crit = tk.Frame(tab1, bg=COLOR_BG)
         row_crit.pack(fill="x", pady=6, padx=4)
         tk.Checkbutton(row_crit, text="  Crítico",
                        variable=self._critico_var,
@@ -939,7 +995,7 @@ class AppNutricion(tk.Tk):
                  font=FONT_PEQUEÑA, bg=COLOR_BG, fg="#757575").pack(side="left", padx=8)
 
         for key, (label_text, _) in self.campos_formulario.items():
-            row = tk.Frame(frame_form, bg=COLOR_BG)
+            row = tk.Frame(tab1, bg=COLOR_BG)
             row.pack(fill="x", pady=3, padx=4)
             tk.Label(row, text=label_text, font=FONT_NORMAL, bg=COLOR_BG,
                      fg=COLOR_TEXTO, width=26, anchor="w").pack(side="left")
@@ -947,18 +1003,18 @@ class AppNutricion(tk.Tk):
             entry.pack(side="right", expand=True, fill="x")
             self.entries[key] = entry
 
-        # Trazabilidad: fecha de ingreso de la ficha y PDF
-        self._separador(frame_form)
-        tk.Label(frame_form, text="Trazabilidad", font=FONT_BOLD, bg=COLOR_BG).pack(anchor="w", padx=4)
+        # Trazabilidad: fecha de ingreso de la ficha, PDF y vida útil
+        self._separador(tab1)
+        tk.Label(tab1, text="Trazabilidad", font=FONT_BOLD, bg=COLOR_BG).pack(anchor="w", padx=4)
 
-        row_fv = tk.Frame(frame_form, bg=COLOR_BG)
+        row_fv = tk.Frame(tab1, bg=COLOR_BG)
         row_fv.pack(fill="x", pady=3, padx=4)
         tk.Label(row_fv, text="Ingreso ficha (AAAA-MM-DD):", font=FONT_NORMAL,
                  bg=COLOR_BG, width=26, anchor="w").pack(side="left")
         self._e_fecha_ingreso = tk.Entry(row_fv, font=FONT_NORMAL, relief="solid", bd=1)
         self._e_fecha_ingreso.pack(side="right", expand=True, fill="x")
 
-        row_pdf = tk.Frame(frame_form, bg=COLOR_BG)
+        row_pdf = tk.Frame(tab1, bg=COLOR_BG)
         row_pdf.pack(fill="x", pady=3, padx=4)
         tk.Label(row_pdf, text="Ficha técnica (PDF):", font=FONT_NORMAL,
                  bg=COLOR_BG, width=26, anchor="w").pack(side="left")
@@ -967,18 +1023,22 @@ class AppNutricion(tk.Tk):
         self._boton(row_pdf, "📂", lambda: self._seleccionar_pdf(),
                     ancho=4).pack(side="right", padx=4)
 
-        row_mc = tk.Frame(frame_form, bg=COLOR_BG)
+        row_mc = tk.Frame(tab1, bg=COLOR_BG)
         row_mc.pack(fill="x", pady=3, padx=4)
         tk.Label(row_mc, text="Vida útil (semanas):", font=FONT_NORMAL,
                  bg=COLOR_BG, width=26, anchor="w").pack(side="left")
         self._e_meses_cad = tk.Entry(row_mc, font=FONT_NORMAL, relief="solid", bd=1)
         self._e_meses_cad.pack(side="right", expand=True, fill="x")
 
-        # ── Alérgenos, colorantes, trazas y requerimientos ────────────────────
-        self._construir_seccion_etiquetado(frame_form)
+        # ── Pestaña 2: Micronutrientes (vitaminas y minerales) ──
+        tab2_outer, tab2, _ = self._crear_scroll_frame(notebook)
+        notebook.add(tab2_outer, text="Micronutrientes")
+        self._construir_seccion_micronutrientes(tab2)
 
-        # ── Micronutrientes nativos (vitaminas y minerales por 100g) ──────────
-        self._construir_seccion_micronutrientes(frame_form)
+        # ── Pestaña 3: Alérgenos, Aditivos y Requerimientos ──
+        tab3_outer, tab3, _ = self._crear_scroll_frame(notebook)
+        notebook.add(tab3_outer, text="Alérgenos, Aditivos y Requerimientos")
+        self._construir_seccion_etiquetado(tab3)
 
         # Llegó desde la vista de detalle con un ingrediente puntual (editar
         # o clonar desde él): precarga sus datos sin obligar a buscarlo de
@@ -999,9 +1059,15 @@ class AppNutricion(tk.Tk):
             self._declarable_vars[codigo] = var
             sin = SIN_CODES.get(codigo)
             texto = f"  {nombre} (SIN {sin})" if sin else f"  {nombre}"
+            # Aspartamo y su sal con acesulfamo disparan la leyenda de
+            # fenilcetonúricos — se marca en el propio checkbox, no solo en
+            # el aviso general de la categoría, para que no pase inadvertido.
+            if codigo in CODIGOS_FENILALANINA:
+                texto += "  ⚠ activa: Fenilalanina"
             tk.Checkbutton(grid, text=texto, variable=var,
-                           font=FONT_NORMAL, bg=COLOR_BG,
-                           fg=(color or COLOR_TEXTO),
+                           font=FONT_NORMAL,
+                           bg=COLOR_BG, fg=("#B71C1C" if codigo in CODIGOS_FENILALANINA
+                                           else (color or COLOR_TEXTO)),
                            selectcolor="#FFFFFF", activebackground=COLOR_BG,
                            anchor="w").grid(row=i // 2, column=i % 2,
                                             sticky="w", padx=4)
@@ -1013,8 +1079,6 @@ class AppNutricion(tk.Tk):
         edulcorantes no nutritivos y polialcoholes (unión), cafeína/taurina y
         trazas (propagación), requerimientos alimentarios (intersección).
         """
-        self._separador(frame_form)
-
         tk.Label(frame_form, text="A. Alérgenos Oficiales (Res. Ex. 427/2010, Art. 107 h)",
                  font=FONT_BOLD, bg=COLOR_BG).pack(anchor="w", padx=4)
         tk.Label(frame_form,
@@ -1085,7 +1149,6 @@ class AppNutricion(tk.Tk):
         Se dejan en blanco los que la ficha técnica del proveedor no declara;
         solo se guardan los que tengan un valor mayor a cero.
         """
-        self._separador(frame_form)
         tk.Label(frame_form, text="Micronutrientes (por 100 g)",
                  font=FONT_BOLD, bg=COLOR_BG).pack(anchor="w", padx=4)
         tk.Label(frame_form,
