@@ -222,6 +222,11 @@ class Producto(Base):
     nombre: Mapped[str] = mapped_column(String, nullable=False, unique=True)
     descripcion: Mapped[str | None] = mapped_column(Text, default="")
     critico: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Clasificación comercial: ¿se vende tal cual (Producto Terminado) o es
+    # una preparación de uso interno? No afecta la receta — cualquier
+    # Producto, sea o no vendible, puede seguir siendo componente de otro.
+    es_vendible: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default="1")
 
     # Datos de etiquetado
     porcion_g: Mapped[float] = mapped_column(Float, default=25.0)

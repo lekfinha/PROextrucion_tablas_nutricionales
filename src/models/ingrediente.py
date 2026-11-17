@@ -42,12 +42,19 @@ class Ingrediente(Base):
     semanas_caducidad: Mapped[int | None] = mapped_column(
         Integer, nullable=True, default=None)
 
-    # ── Etiquetado: alérgenos, colorantes y requerimientos ───────────────────
-    # Códigos del catálogo src.etiquetado.DECLARABLES (alérgenos oficiales y
-    # colorantes de rotulación destacada). Reasignar la lista completa al
-    # editar — SQLAlchemy no detecta mutaciones in-place de una columna JSON.
-    alergenos: Mapped[list[str]] = mapped_column(
+    # ── Etiquetado: alérgenos, colorantes, edulcorantes, polialcoholes ────────
+    # Códigos del catálogo src.etiquetado.DECLARABLES: alérgenos oficiales
+    # (Res. Ex. 427/2010), colorantes de rotulación destacada (Art. 136),
+    # edulcorantes no nutritivos (Art. 146) y polialcoholes (Art. 151).
+    # Reasignar la lista completa al editar — SQLAlchemy no detecta
+    # mutaciones in-place de una columna JSON.
+    declarables: Mapped[list[str]] = mapped_column(
         JSON, default=list, nullable=False, server_default="'[]'")
+    # Cafeína añadida o taurina (bebidas energéticas/fantasía, Art. 106 bis):
+    # dispara la leyenda de advertencia, no es parte del catálogo anterior
+    # porque no tiene un "nombre declarado" propio en la lista de ingredientes.
+    cafeina_taurina: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0")
     # Advertencia de contaminación cruzada, tal como irá impresa.
     # Ej: "Puede contener maní." / "Elaborado en líneas que procesan leche."
     trazas: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)

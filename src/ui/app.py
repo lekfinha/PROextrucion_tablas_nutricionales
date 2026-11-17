@@ -15,9 +15,11 @@ from src.models.producto import (Producto, RecetaIngrediente, RecetaProducto,
                                   CostoOperativo, NUTRIENTES, ETIQUETAS_NUTRIENTES)
 from src.models.micronutriente import (Micronutriente, ProductoMicronutriente,
                                         IngredienteMicronutriente)
-from src.normativas import calcular_sellos, listar_normativas, NORMATIVAS_DISPONIBLES
-from src.etiquetado import (consolidar_etiquetado, DECLARABLES, REQUERIMIENTOS,
-                            TIPO_COLORANTE)
+from src.normativas import calcular_sellos, listar_normativas
+from src.etiquetado import (consolidar_etiquetado, DECLARABLES, SIN_CODES,
+                            REQUERIMIENTOS, TIPO_ALERGENO, TIPO_COLORANTE,
+                            TIPO_EDULCORANTE, TIPO_POLIALCOHOL,
+                            TIPO_ADVERTENCIA, TIPO_TRAZA)
 from src.utils.redondeo import redondear_minsal
 
 # ── Paleta y fuentes ───────────────────────────────────────────────────────────
@@ -71,8 +73,9 @@ class AppNutricion(tk.Tk):
 
         self.entries: dict[str, tk.Entry] = {}
         # Checkboxes de etiquetado del ingrediente: {código → BooleanVar}
-        self._alergeno_vars: dict[str, tk.BooleanVar] = {}
+        self._declarable_vars: dict[str, tk.BooleanVar] = {}
         self._req_vars: dict[str, tk.BooleanVar] = {}
+        self._cafeina_var = tk.BooleanVar(value=False)
         # Entries de micronutrientes del ingrediente: {micronutriente_id: Entry}
         self._entries_micro: dict[int, tk.Entry] = {}
         self._nombres_micro: dict[int, str] = {}
@@ -93,7 +96,7 @@ class AppNutricion(tk.Tk):
         for w in self.container.winfo_children():
             w.destroy()
         self.entries.clear()
-        self._alergeno_vars.clear()
+        self._declarable_vars.clear()
         self._req_vars.clear()
         self._entries_micro.clear()
         self._nombres_micro.clear()
@@ -358,12 +361,13 @@ class AppNutricion(tk.Tk):
         tree.tag_configure("con_alergeno", foreground="#C62828")
         tree.pack(fill="x", padx=20)
         for linea in ficha.ingredientes:
-            marcas = ", ".join(DECLARABLES.get(c, (c, ""))[0] for c in linea.alergenos)
+            marcas = ", ".join(DECLARABLES.get(c, (c, ""))[0] for c in linea.declarables)
             tree.insert("", "end", values=(linea.nombre, f"{linea.porcentaje:.3f}", marcas),
                         tags=("con_alergeno",) if marcas else ())
 
-        # String listo para el arte: orden decreciente, colorantes en negrilla
-        # y el alérgeno entre paréntesis cuando el nombre no lo menciona.
+        # String listo para el arte: orden decreciente, colorantes/edulcorantes
+        # en negrilla, alérgenos entre paréntesis, cerrado por las leyendas
+        # obligatorias y las trazas — el párrafo completo de la etiqueta.
         tk.Label(marco, text="Lista para el envase:", font=FONT_PEQUEÑA,
                  bg=COLOR_BG, fg="#757575").pack(anchor="w", pady=(6, 0))
         self._texto_con_negritas(marco, ficha.texto_ingredientes())
@@ -375,10 +379,39 @@ class AppNutricion(tk.Tk):
                          bg=COLOR_BG, fg="#C62828", wraplength=680,
                          justify="left").pack(anchor="w", pady=(4, 0))
 
-        if ficha.trazas_advertencias:
-            tk.Label(marco, text=ficha.texto_trazas(), font=FONT_NORMAL,
-                     bg=COLOR_BG, fg="#555555", wraplength=680,
-                     justify="left").pack(anchor="w", pady=(2, 0))
+        # Desglose sanitario: solo lo que el árbol realmente activó
+        cuerpo_al = self._acordeon(
+            marco,
+            (f"Desglose sanitario: {len(ficha.alertas)} declaraciones"
+             if ficha.alertas else "Desglose sanitario: ninguna declaración"),
+            "#C62828" if ficha.alertas else "#43A047")
+
+        if not ficha.alertas:
+            tk.Label(cuerpo_al,
+                     text=("✓ Libre de alérgenos, colorantes destacados, "
+                           "edulcorantes, polialcoholes y trazas declarables"),
+                     font=FONT_NORMAL, bg=COLOR_BG, fg="#43A047").pack(anchor="w", padx=20)
+        else:
+            tree_al = ttk.Treeview(cuerpo_al, columns=("qué", "tipo", "quién"),
+                                   show="headings", height=len(ficha.alertas))
+            tree_al.heading("qué", text="Alérgeno / Aditivo")
+            tree_al.heading("tipo", text="Tipo de Declaración")
+            tree_al.heading("quién", text="Ingredientes que lo contienen")
+            # "qué" ancha porque las trazas y leyendas son frases completas
+            tree_al.column("qué", width=240)
+            tree_al.column("tipo", width=190, anchor="center")
+            tree_al.column("quién", width=250)
+            tree_al.tag_configure(TIPO_ALERGENO, foreground="#C62828")
+            tree_al.tag_configure(TIPO_COLORANTE, foreground="#AD1457")
+            tree_al.tag_configure(TIPO_EDULCORANTE, foreground="#6A1B9A")
+            tree_al.tag_configure(TIPO_POLIALCOHOL, foreground="#EF6C00")
+            tree_al.tag_configure(TIPO_ADVERTENCIA, foreground="#B71C1C")
+            tree_al.tag_configure(TIPO_TRAZA, foreground="#757575")
+            tree_al.pack(fill="x", padx=20)
+            for a in ficha.alertas:
+                tree_al.insert("", "end", tags=(a.tipo,),
+                               values=(a.nombre, a.etiqueta_tipo,
+                                       ", ".join(a.responsables)))
 
         # Desglose de requerimientos: qué se cumple y, si no, quién lo impide
         n_cumple = sum(1 for k in REQUERIMIENTOS if ficha.cumple(k))
@@ -559,70 +592,315 @@ class AppNutricion(tk.Tk):
     # ══════════════════════════════════════════════════════════════════════════
 
     def mostrar_menu_principal(self):
+        """
+        Explorador en árbol — pantalla de inicio. Reemplaza el viejo menú de
+        tres botones: Ingredientes, Productos (divididos en Vendibles / Uso
+        Interno) y Normativas conviven como carpetas de un mismo árbol.
+        """
         self.limpiar_pantalla()
-        self._titulo(self.container, "Menú Principal")
-        tk.Label(self.container,
-                 text="Sistema de Gestión Nutricional — Pro Extrusion",
-                 font=FONT_PEQUEÑA, bg=COLOR_BG, fg="#757575").pack(pady=(0, 16))
+        self._seleccion_actual: tuple[str, int | None] | None = None
 
-        frame = tk.Frame(self.container, bg=COLOR_BG)
-        frame.pack()
+        barra = tk.Frame(self.container, bg=COLOR_BG)
+        barra.pack(fill="x", padx=12, pady=(12, 6))
+        tk.Label(barra, text="🔍", bg=COLOR_BG, font=FONT_NORMAL).pack(side="left")
+        self._e_buscar_arbol = tk.Entry(barra, font=FONT_NORMAL, relief="solid", bd=1)
+        self._e_buscar_arbol.pack(side="left", fill="x", expand=True, padx=(4, 10))
+        self._e_buscar_arbol.bind("<KeyRelease>", self._filtrar_arbol)
 
-        self._boton(frame, "📦  Gestionar Ingredientes",
-                    self.mostrar_menu_ingredientes,
-                    color_bg=COLOR_ACENTO, color_fg="white").pack(pady=5)
-        self._boton(frame, "🧪  Gestionar Productos",
-                    self.mostrar_menu_productos).pack(pady=5)
+        self._boton(barra, "➕ Ingrediente", lambda: self.mostrar_formulario("crear_nuevo"),
+                    color_bg=COLOR_ACENTO, color_fg="white", ancho=15).pack(side="left", padx=2)
+        self._boton(barra, "➕ Producto", lambda: self.mostrar_formulario_producto("crear"),
+                    color_bg=COLOR_ACENTO, color_fg="white", ancho=13).pack(side="left", padx=2)
+        self._boton(barra, "🗑️ Eliminar", self._eliminar_seleccionado,
+                    color_bg=COLOR_PELIGRO, color_fg="white", ancho=12).pack(side="left", padx=2)
 
-        tk.Frame(frame, bg="#BDBDBD", height=1).pack(fill="x", pady=12)
+        self._separador(self.container)
 
-        self._boton(frame, "📋  Normativas de Etiquetado",
-                    self.mostrar_menu_normativas).pack(pady=5)
+        frame_tree = tk.Frame(self.container, bg=COLOR_BG)
+        frame_tree.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        self._tree_explorador = ttk.Treeview(frame_tree, show="tree", selectmode="browse")
+        sb = ttk.Scrollbar(frame_tree, orient="vertical", command=self._tree_explorador.yview)
+        self._tree_explorador.configure(yscrollcommand=sb.set)
+        self._tree_explorador.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+        self._tree_explorador.bind("<<TreeviewSelect>>", self._on_seleccion_arbol)
+        self._tree_explorador.bind("<Double-1>", self._on_abrir_arbol)
+        self._tree_explorador.bind("<Return>", self._on_abrir_arbol)
+
+        self._poblar_arbol()
+
+    def _poblar_arbol(self, filtro: str = ""):
+        """
+        Reconstruye el árbol completo. Con filtro, las carpetas que tengan
+        coincidencias quedan expandidas automáticamente; sin filtro, el árbol
+        arranca colapsado para no saturar la pantalla.
+        """
+        tree = self._tree_explorador
+        tree.delete(*tree.get_children())
+        # iid del árbol → (tipo, id). Las carpetas no se registran: el
+        # default ("carpeta", None) de .get() ya las cubre.
+        self._tree_nodos: dict[str, tuple[str, int | None]] = {}
+        f = filtro.strip().lower()
+
+        nodo_ing = tree.insert("", "end", text="📦 Ingredientes", open=bool(f))
+        with Session(engine) as s:
+            for ing in s.query(Ingrediente).order_by(Ingrediente.nombre).all():
+                if f and f not in ing.nombre.lower() and f not in (ing.fabricante or "").lower():
+                    continue
+                iid = tree.insert(nodo_ing, "end", text=f"{ing.nombre} — {ing.fabricante}")
+                self._tree_nodos[iid] = ("ingrediente", ing.id)
+
+        nodo_prod = tree.insert("", "end", text="🧪 Productos", open=bool(f))
+        nodo_vend = tree.insert(nodo_prod, "end", text="✅ Productos Vendibles", open=bool(f))
+        nodo_interno = tree.insert(nodo_prod, "end", text="🔧 Preparaciones / Uso Interno",
+                                   open=bool(f))
+        with Session(engine) as s:
+            for p in s.query(Producto).order_by(Producto.nombre).all():
+                if f and f not in p.nombre.lower():
+                    continue
+                raiz = nodo_vend if p.es_vendible else nodo_interno
+                iid = tree.insert(raiz, "end", text=p.nombre)
+                self._tree_nodos[iid] = ("producto", p.id)
+
+        nodo_norm = tree.insert("", "end", text="📋 Normativas")
+        self._tree_nodos[nodo_norm] = ("normativas", None)
+
+    def _filtrar_arbol(self, event=None):
+        self._poblar_arbol(self._e_buscar_arbol.get())
+
+    def _on_seleccion_arbol(self, event=None):
+        """Solo guarda qué quedó seleccionado — el botón Eliminar lo usa."""
+        sel = self._tree_explorador.selection()
+        self._seleccion_actual = (self._tree_nodos.get(sel[0], ("carpeta", None))
+                                  if sel else None)
+
+    def _on_abrir_arbol(self, event=None):
+        """Doble clic / Enter sobre un ítem: abre su vista de detalle."""
+        sel = self._tree_explorador.selection()
+        if not sel:
+            return
+        kind, id_ = self._tree_nodos.get(sel[0], ("carpeta", None))
+        if kind == "ingrediente":
+            self.mostrar_detalle_ingrediente(id_)
+        elif kind == "producto":
+            self.mostrar_detalle_producto(id_)
+        elif kind == "normativas":
+            self.mostrar_vista_normativas_vacia()
+
+    def _eliminar_seleccionado(self):
+        """Botón global de la barra superior: borra lo que esté seleccionado en el árbol."""
+        sel = self._seleccion_actual
+        if not sel or sel[0] not in ("ingrediente", "producto"):
+            messagebox.showinfo("Eliminar",
+                                "Selecciona un Ingrediente o Producto en el árbol primero.")
+            return
+        kind, id_ = sel
+        etiqueta = "Ingrediente" if kind == "ingrediente" else "Producto"
+        if not messagebox.askyesno("Confirmar eliminación",
+                                   f"¿Eliminar este {etiqueta}?\n\nEsta acción es irreversible."):
+            return
+        try:
+            modelo = Ingrediente if kind == "ingrediente" else Producto
+            with Session(engine) as s:
+                obj = s.get(modelo, id_)
+                if obj:
+                    s.delete(obj)
+                    s.commit()
+            messagebox.showinfo("✅ Eliminado", f"{etiqueta} eliminado correctamente.")
+            self._seleccion_actual = None
+            self._poblar_arbol(self._e_buscar_arbol.get())
+        except Exception as exc:
+            messagebox.showerror("Error inesperado", str(exc))
 
     # ══════════════════════════════════════════════════════════════════════════
-    # INGREDIENTES — MENÚ + CRUD
+    # VISTAS DE DETALLE (solo lectura, con accesos a Editar / Tabla Nutricional)
     # ══════════════════════════════════════════════════════════════════════════
 
-    def mostrar_menu_ingredientes(self):
+    def mostrar_detalle_ingrediente(self, ing_id):
         self.limpiar_pantalla()
-        self._titulo(self.container, "📦 Gestionar Ingredientes")
+        with Session(engine) as s:
+            ing = s.get(Ingrediente, ing_id)
+            if ing is None:
+                messagebox.showerror("Error", "Ingrediente no encontrado.")
+                self.mostrar_menu_principal()
+                return
 
-        frame = tk.Frame(self.container, bg=COLOR_BG)
-        frame.pack(pady=10)
+            cab = tk.Frame(self.container, bg=COLOR_BG)
+            cab.pack(fill="x", padx=15, pady=(14, 2))
+            tk.Label(cab, text=ing.nombre, font=FONT_TITULO, bg=COLOR_BG).pack(side="left")
+            botones = tk.Frame(cab, bg=COLOR_BG)
+            botones.pack(side="right")
+            self._boton(botones, "✏️ Editar",
+                        lambda: self.mostrar_formulario("modificar", ing_id=ing.id),
+                        color_bg=COLOR_ACENTO, color_fg="white", ancho=12).pack(side="right")
+            self._boton(botones, "📋 Clonar",
+                        lambda: self.mostrar_formulario("crear_desde_existente", ing_id=ing.id),
+                        ancho=12).pack(side="right", padx=(0, 6))
+            tk.Label(self.container, text=f"Fabricante: {ing.fabricante}",
+                    font=FONT_PEQUEÑA, bg=COLOR_BG, fg="#757575").pack(anchor="w", padx=15)
 
-        self._boton(frame, "➕  Agregar Ingrediente",
-                    self.mostrar_menu_agregar,
-                    color_bg=COLOR_ACENTO, color_fg="white").pack(pady=5)
-        self._boton(frame, "✏️  Modificar Ingrediente",
-                    lambda: self.mostrar_formulario("modificar")).pack(pady=5)
-        self._boton(frame, "🗑️  Eliminar Ingrediente",
-                    self.mostrar_vista_eliminar,
-                    color_bg=COLOR_PELIGRO, color_fg="white").pack(pady=5)
+            self._separador(self.container)
+            outer, cuerpo, _ = self._crear_scroll_frame(self.container)
+            outer.pack(fill="both", expand=True, padx=10)
 
-        tk.Frame(frame, bg="#BDBDBD", height=1).pack(fill="x", pady=12)
-        self._boton(frame, "← Volver al Menú Principal",
-                    self.mostrar_menu_principal, ancho=30).pack(pady=5)
+            lf = tk.LabelFrame(cuerpo, text=" Información General ", bg=COLOR_BG,
+                               font=FONT_NORMAL, fg=COLOR_TEXTO)
+            lf.pack(fill="x", padx=5, pady=5)
+            info = [
+                ("Costo por kg",        f"${ing.costo_kg:,.2f}"),
+                ("Crítico",             "Sí" if ing.critico else "No"),
+                ("Humedad",             f"{ing.humedad_porcentaje * 100.0:.2f}%"),
+                ("Vida útil",           f"{ing.semanas_caducidad} semanas"
+                                        if ing.semanas_caducidad is not None else "—"),
+                ("Ingreso de ficha",    str(ing.fecha_ingreso_ficha or "—")),
+                ("Ficha técnica (PDF)", ing.ruta_pdf_ficha or "—"),
+            ]
+            for etiqueta, valor in info:
+                fila = tk.Frame(lf, bg=COLOR_BG)
+                fila.pack(fill="x", padx=8, pady=2)
+                tk.Label(fila, text=f"{etiqueta}:", font=FONT_NORMAL, bg=COLOR_BG,
+                        width=20, anchor="w").pack(side="left")
+                tk.Label(fila, text=valor, font=FONT_NORMAL, bg=COLOR_BG,
+                        anchor="w").pack(side="left")
 
-    def mostrar_menu_agregar(self):
+            lf2 = tk.LabelFrame(cuerpo, text=" Tabla Nutricional Base (por 100 g) ",
+                               bg=COLOR_BG, font=FONT_NORMAL, fg=COLOR_TEXTO)
+            lf2.pack(fill="x", padx=5, pady=5)
+            tree_nut = ttk.Treeview(lf2, columns=("nut", "val"), show="headings",
+                                    height=len(NUTRIENTES))
+            tree_nut.heading("nut", text="Nutriente")
+            tree_nut.heading("val", text="Por 100 g")
+            tree_nut.column("nut", width=320)
+            tree_nut.column("val", width=120, anchor="center")
+            tree_nut.pack(fill="x", padx=8, pady=8)
+            for key in NUTRIENTES:
+                tree_nut.insert("", "end", values=(
+                    ETIQUETAS_NUTRIENTES.get(key, key),
+                    redondear_minsal(getattr(ing, key, 0.0))))
+
+            lf3 = tk.LabelFrame(cuerpo,
+                                text=" Alérgenos, Colorantes, Edulcorantes y Polialcoholes ",
+                                bg=COLOR_BG, font=FONT_NORMAL, fg=COLOR_TEXTO)
+            lf3.pack(fill="x", padx=5, pady=5)
+            codigos = ing.declarables or []
+            if not codigos:
+                tk.Label(lf3, text="— No declara ninguno —", font=FONT_NORMAL,
+                        bg=COLOR_BG, fg="#757575").pack(anchor="w", padx=8, pady=4)
+            else:
+                colores_tipo = {TIPO_ALERGENO: "#C62828", TIPO_COLORANTE: "#AD1457",
+                               TIPO_EDULCORANTE: "#6A1B9A", TIPO_POLIALCOHOL: "#EF6C00"}
+                for codigo in codigos:
+                    nombre, tipo = DECLARABLES.get(codigo, (codigo, TIPO_ALERGENO))
+                    sin = SIN_CODES.get(codigo)
+                    texto = f"• {nombre}" + (f" (SIN {sin})" if sin else "")
+                    tk.Label(lf3, text=texto, font=FONT_NORMAL, bg=COLOR_BG,
+                            fg=colores_tipo.get(tipo, COLOR_TEXTO)).pack(anchor="w", padx=8)
+            if ing.cafeina_taurina:
+                tk.Label(lf3, text="• Cafeína añadida / Taurina", font=FONT_NORMAL,
+                        bg=COLOR_BG, fg="#B71C1C").pack(anchor="w", padx=8, pady=(4, 0))
+            if ing.trazas:
+                tk.Label(lf3, text=f"⚠️ Trazas: {ing.trazas}", font=FONT_NORMAL,
+                        bg=COLOR_BG, fg="#555555", wraplength=640,
+                        justify="left").pack(anchor="w", padx=8, pady=(6, 4))
+
+            lf4 = tk.LabelFrame(cuerpo, text=" Requerimientos Alimentarios ", bg=COLOR_BG,
+                               font=FONT_NORMAL, fg=COLOR_TEXTO)
+            lf4.pack(fill="x", padx=5, pady=5)
+            for campo, etiqueta in REQUERIMIENTOS.items():
+                cumple = bool(getattr(ing, campo, False))
+                fila = tk.Frame(lf4, bg=COLOR_BG)
+                fila.pack(fill="x", padx=8, pady=2)
+                tk.Label(fila, text=etiqueta, font=FONT_NORMAL, bg=COLOR_BG,
+                        width=20, anchor="w").pack(side="left")
+                tk.Label(fila, text="Sí" if cumple else "No", font=FONT_NORMAL, bg=COLOR_BG,
+                        fg="#43A047" if cumple else "#757575").pack(side="left")
+
+            self._boton(cuerpo, "← Volver al Explorador", self.mostrar_menu_principal,
+                        ancho=28).pack(pady=12)
+
+    def mostrar_detalle_producto(self, prod_id):
         self.limpiar_pantalla()
-        self._titulo(self.container, "Agregar Ingrediente")
+        with Session(engine) as s:
+            p = s.get(Producto, prod_id, options=self._selectinload_completo())
+            if p is None:
+                messagebox.showerror("Error", "Producto no encontrado.")
+                self.mostrar_menu_principal()
+                return
 
-        frame = tk.Frame(self.container, bg=COLOR_BG)
-        frame.pack(pady=10)
+            cab = tk.Frame(self.container, bg=COLOR_BG)
+            cab.pack(fill="x", padx=15, pady=(14, 2))
+            tk.Label(cab, text=p.nombre, font=FONT_TITULO, bg=COLOR_BG).pack(side="left")
+            botones = tk.Frame(cab, bg=COLOR_BG)
+            botones.pack(side="right")
+            self._boton(botones, "📊 Ver Tabla Nutricional",
+                        lambda: self._ver_tabla_prod(p.id),
+                        color_bg=COLOR_ACENTO, color_fg="white", ancho=22).pack(side="right")
+            self._boton(botones, "✏️ Editar Producto",
+                        lambda: self.mostrar_formulario_producto("editar", p.id),
+                        ancho=16).pack(side="right", padx=(0, 6))
 
-        self._boton(frame, "📄  Crear ingrediente desde cero",
-                    lambda: self.mostrar_formulario("crear_nuevo"),
-                    color_bg=COLOR_ACENTO, color_fg="white").pack(pady=8)
-        self._boton(frame, "📋  Crear a partir de uno existente",
-                    lambda: self.mostrar_formulario("crear_desde_existente")).pack(pady=8)
+            badge_txt = ("✅ Vendible (Producto Terminado)" if p.es_vendible
+                        else "🔧 Uso Interno / Preparación")
+            tk.Label(self.container, text=badge_txt, font=FONT_BOLD, bg=COLOR_BG,
+                    fg="#43A047" if p.es_vendible else "#EF6C00").pack(anchor="w", padx=15)
+            if p.descripcion:
+                tk.Label(self.container, text=p.descripcion, font=FONT_PEQUEÑA, bg=COLOR_BG,
+                        fg="#757575", wraplength=640,
+                        justify="left").pack(anchor="w", padx=15, pady=(2, 0))
 
-        tk.Frame(self.container, bg="#BDBDBD", height=1).pack(fill="x", padx=40, pady=20)
-        self._boton(self.container, "← Volver",
-                    self.mostrar_menu_ingredientes, ancho=30).pack()
+            self._separador(self.container)
+            outer, cuerpo, _ = self._crear_scroll_frame(self.container)
+            outer.pack(fill="both", expand=True, padx=10)
 
-    def mostrar_formulario(self, modo):
+            lf = tk.LabelFrame(cuerpo, text=" Información General ", bg=COLOR_BG,
+                               font=FONT_NORMAL, fg=COLOR_TEXTO)
+            lf.pack(fill="x", padx=5, pady=5)
+            vida_util = p.semanas_caducidad_efectiva()
+            info = [
+                ("Crítico",            "Sí" if p.critico else "No"),
+                ("Humedad final",      f"{p.humedad_final * 100:.2f}%"),
+                ("Porción",            f"{p.porcion_g:g} g"),
+                ("Gramaje empaque",    f"{p.gramaje_g:g} g"),
+                ("Vida útil efectiva", f"{vida_util} semanas" if vida_util is not None else "—"),
+            ]
+            for etiqueta, valor in info:
+                fila = tk.Frame(lf, bg=COLOR_BG)
+                fila.pack(fill="x", padx=8, pady=2)
+                tk.Label(fila, text=f"{etiqueta}:", font=FONT_NORMAL, bg=COLOR_BG,
+                        width=20, anchor="w").pack(side="left")
+                tk.Label(fila, text=valor, font=FONT_NORMAL, bg=COLOR_BG,
+                        anchor="w").pack(side="left")
+
+            lf2 = tk.LabelFrame(cuerpo, text=" Receta Directa (un nivel) ", bg=COLOR_BG,
+                               font=FONT_NORMAL, fg=COLOR_TEXTO)
+            lf2.pack(fill="x", padx=5, pady=5)
+            filas_r = sorted(
+                [("Ingrediente", r.ingrediente.nombre, r.proporcion * 100.0)
+                 for r in p.receta_ingredientes]
+                + [("Producto", c.hijo.nombre, c.proporcion * 100.0)
+                   for c in p.receta_productos],
+                key=lambda t: -t[2])
+            tree_r = ttk.Treeview(lf2, columns=("tipo", "nombre", "pct"), show="headings",
+                                  height=max(len(filas_r), 1))
+            tree_r.heading("tipo", text="Tipo")
+            tree_r.heading("nombre", text="Componente")
+            tree_r.heading("pct", text="%")
+            tree_r.column("tipo", width=100, anchor="center")
+            tree_r.column("nombre", width=330)
+            tree_r.column("pct", width=90, anchor="center")
+            tree_r.pack(fill="x", padx=8, pady=8)
+            if not filas_r:
+                tree_r.insert("", "end", values=("—", "Sin componentes", ""))
+            for tipo, nombre, pct in filas_r:
+                tree_r.insert("", "end", values=(tipo, nombre, f"{pct:.3f}"))
+
+            self._boton(cuerpo, "← Volver al Explorador", self.mostrar_menu_principal,
+                        ancho=28).pack(pady=12)
+
+    def mostrar_formulario(self, modo, ing_id=None):
         self.limpiar_pantalla()
         self._critico_var = tk.BooleanVar(value=False)
+        self._cafeina_var = tk.BooleanVar(value=False)
         titulos = {
             "crear_nuevo":           "Nuevo Ingrediente",
             "crear_desde_existente": "Clonar Ingrediente",
@@ -639,9 +917,10 @@ class AppNutricion(tk.Tk):
                 fb, self.cargar_datos_en_formulario)
             self.combo_busqueda.pack(fill="x", pady=4)
 
-        destino = (self.mostrar_menu_agregar
-                   if modo in ("crear_nuevo", "crear_desde_existente")
-                   else self.mostrar_menu_ingredientes)
+        # Al crear/clonar vuelve al explorador; al modificar vuelve al
+        # detalle de este ingrediente — edición in-place, no a un listado.
+        destino = (self.mostrar_menu_principal if ing_id is None
+                   else lambda: self.mostrar_detalle_ingrediente(ing_id))
         self._barra_botones(destino, lambda: self.guardar_ingrediente(modo),
                             "💾  Guardar Ingrediente")
         self._separador(self.container)
@@ -701,35 +980,80 @@ class AppNutricion(tk.Tk):
         # ── Micronutrientes nativos (vitaminas y minerales por 100g) ──────────
         self._construir_seccion_micronutrientes(frame_form)
 
-    def _construir_seccion_etiquetado(self, frame_form):
-        """
-        Declaraciones de la ficha técnica que el producto final hereda:
-        alérgenos y colorantes destacados (unión), advertencia de trazas
-        (propagación) y requerimientos alimentarios (intersección).
-        """
-        self._separador(frame_form)
-        tk.Label(frame_form, text="Alérgenos y colorantes destacados",
-                 font=FONT_BOLD, bg=COLOR_BG).pack(anchor="w", padx=4)
-        tk.Label(frame_form,
-                 text=("Marcar solo lo que la ficha técnica declara como presente.\n"
-                       "Se imprimen en negrilla bajo «Contiene:» en la etiqueta."),
-                 font=FONT_PEQUEÑA, bg=COLOR_BG, fg="#757575",
-                 justify="left").pack(anchor="w", padx=4, pady=(0, 4))
+        # Llegó desde la vista de detalle con un ingrediente puntual (editar
+        # o clonar desde él): precarga sus datos sin obligar a buscarlo de
+        # nuevo en el combo.
+        if modo in ("modificar", "crear_desde_existente") and ing_id is not None:
+            id_unico = next((k for k, v in self.mapa_ingredientes.items() if v == ing_id), None)
+            if id_unico:
+                self.combo_busqueda.set(id_unico)
+            self.cargar_datos_en_formulario(ing_id=ing_id)
 
-        grid = tk.Frame(frame_form, bg=COLOR_BG)
-        grid.pack(fill="x", padx=4)
-        for i, (codigo, (nombre, tipo)) in enumerate(DECLARABLES.items()):
+    def _grid_declarables(self, parent, tipo, color=None):
+        """Grilla de checkboxes para una categoría del catálogo DECLARABLES."""
+        grid = tk.Frame(parent, bg=COLOR_BG)
+        grid.pack(fill="x", padx=4, pady=(0, 6))
+        items = [(c, n) for c, (n, t) in DECLARABLES.items() if t == tipo]
+        for i, (codigo, nombre) in enumerate(items):
             var = tk.BooleanVar(value=False)
-            self._alergeno_vars[codigo] = var
-            tk.Checkbutton(grid, text=f"  {nombre}", variable=var,
+            self._declarable_vars[codigo] = var
+            sin = SIN_CODES.get(codigo)
+            texto = f"  {nombre} (SIN {sin})" if sin else f"  {nombre}"
+            tk.Checkbutton(grid, text=texto, variable=var,
                            font=FONT_NORMAL, bg=COLOR_BG,
-                           fg=("#C62828" if tipo == TIPO_COLORANTE else COLOR_TEXTO),
+                           fg=(color or COLOR_TEXTO),
                            selectcolor="#FFFFFF", activebackground=COLOR_BG,
                            anchor="w").grid(row=i // 2, column=i % 2,
                                             sticky="w", padx=4)
 
+    def _construir_seccion_etiquetado(self, frame_form):
+        """
+        Catálogos oficiales RSA (D.S. 977/1996) y Res. Ex. 427/2010 que el
+        producto final hereda del árbol: alérgenos, colorantes destacados,
+        edulcorantes no nutritivos y polialcoholes (unión), cafeína/taurina y
+        trazas (propagación), requerimientos alimentarios (intersección).
+        """
+        self._separador(frame_form)
+
+        tk.Label(frame_form, text="A. Alérgenos Oficiales (Res. Ex. 427/2010, Art. 107 h)",
+                 font=FONT_BOLD, bg=COLOR_BG).pack(anchor="w", padx=4)
+        tk.Label(frame_form,
+                 text="Marcar solo lo que la ficha técnica declara como presente.",
+                 font=FONT_PEQUEÑA, bg=COLOR_BG, fg="#757575").pack(anchor="w", padx=4, pady=(0, 2))
+        self._grid_declarables(frame_form, TIPO_ALERGENO)
+
+        tk.Label(frame_form, text="B. Colorantes de Rotulación Destacada (Art. 136)",
+                 font=FONT_BOLD, bg=COLOR_BG).pack(anchor="w", padx=4, pady=(4, 0))
+        tk.Label(frame_form, text="Exigen negrilla en la lista de ingredientes.",
+                 font=FONT_PEQUEÑA, bg=COLOR_BG, fg="#757575").pack(anchor="w", padx=4, pady=(0, 2))
+        self._grid_declarables(frame_form, TIPO_COLORANTE, color="#C62828")
+
+        tk.Label(frame_form, text="C. Edulcorantes No Nutritivos (Art. 146)",
+                 font=FONT_BOLD, bg=COLOR_BG).pack(anchor="w", padx=4, pady=(4, 0))
+        tk.Label(frame_form,
+                 text=("Exigen MAYÚSCULAS y negrilla. El aspartamo y su sal con "
+                       "acesulfamo agregan la leyenda de fenilcetonúricos."),
+                 font=FONT_PEQUEÑA, bg=COLOR_BG, fg="#757575",
+                 justify="left").pack(anchor="w", padx=4, pady=(0, 2))
+        self._grid_declarables(frame_form, TIPO_EDULCORANTE, color="#AD1457")
+
+        tk.Label(frame_form, text="D. Polialcoholes / Polioles (Art. 151)",
+                 font=FONT_BOLD, bg=COLOR_BG).pack(anchor="w", padx=4, pady=(4, 0))
+        tk.Label(frame_form,
+                 text="Cualquiera de estos agrega la advertencia de efecto laxante.",
+                 font=FONT_PEQUEÑA, bg=COLOR_BG, fg="#757575").pack(anchor="w", padx=4, pady=(0, 2))
+        self._grid_declarables(frame_form, TIPO_POLIALCOHOL, color="#EF6C00")
+
+        tk.Label(frame_form, text="E. Otros Compuestos con Advertencia y Trazas",
+                 font=FONT_BOLD, bg=COLOR_BG).pack(anchor="w", padx=4, pady=(4, 0))
+        tk.Checkbutton(frame_form, text="  Cafeína añadida / Taurina (bebidas energéticas)",
+                       variable=self._cafeina_var,
+                       font=FONT_NORMAL, bg=COLOR_BG, fg=COLOR_TEXTO,
+                       selectcolor="#FFFFFF", activebackground=COLOR_BG,
+                       anchor="w").pack(anchor="w", padx=4, pady=(2, 4))
+
         row_tz = tk.Frame(frame_form, bg=COLOR_BG)
-        row_tz.pack(fill="x", pady=(8, 3), padx=4)
+        row_tz.pack(fill="x", pady=(0, 3), padx=4)
         tk.Label(row_tz, text="Trazas / contaminación:", font=FONT_NORMAL,
                  bg=COLOR_BG, width=26, anchor="w").pack(side="left")
         self._e_trazas = tk.Entry(row_tz, font=FONT_NORMAL, relief="solid", bd=1)
@@ -814,11 +1138,13 @@ class AppNutricion(tk.Tk):
                 ts = getattr(st, "st_birthtime", st.st_mtime)
                 self._e_fecha_ingreso.insert(0, str(date.fromtimestamp(ts)))
 
-    def cargar_datos_en_formulario(self, event=None):
-        seleccion = self.combo_busqueda.get()
-        if not seleccion or seleccion not in self.mapa_ingredientes:
-            return
-        self.ingrediente_actual_id = self.mapa_ingredientes[seleccion]
+    def cargar_datos_en_formulario(self, event=None, ing_id=None):
+        if ing_id is None:
+            seleccion = self.combo_busqueda.get()
+            if not seleccion or seleccion not in self.mapa_ingredientes:
+                return
+            ing_id = self.mapa_ingredientes[seleccion]
+        self.ingrediente_actual_id = ing_id
         with Session(engine) as s:
             ing = s.get(Ingrediente, self.ingrediente_actual_id)
             if ing is None:
@@ -841,9 +1167,10 @@ class AppNutricion(tk.Tk):
             if ing.semanas_caducidad is not None:
                 self._e_meses_cad.insert(0, str(ing.semanas_caducidad))
             # Etiquetado
-            codigos_decl = set(ing.alergenos or [])
-            for codigo, var in self._alergeno_vars.items():
+            codigos_decl = set(ing.declarables or [])
+            for codigo, var in self._declarable_vars.items():
                 var.set(codigo in codigos_decl)
+            self._cafeina_var.set(bool(ing.cafeina_taurina))
             for campo, var in self._req_vars.items():
                 var.set(bool(getattr(ing, campo, False)))
             self._e_trazas.delete(0, tk.END)
@@ -933,7 +1260,8 @@ class AppNutricion(tk.Tk):
                 datos["semanas_caducidad"] = int(mc_str)
 
             # Etiquetado (lista nueva: la columna JSON no detecta mutaciones)
-            datos["alergenos"] = [c for c, v in self._alergeno_vars.items() if v.get()]
+            datos["declarables"] = [c for c, v in self._declarable_vars.items() if v.get()]
+            datos["cafeina_taurina"] = self._cafeina_var.get()
             datos["trazas"] = self._e_trazas.get().strip() or None
             for campo, var in self._req_vars.items():
                 datos[campo] = var.get()
@@ -956,9 +1284,10 @@ class AppNutricion(tk.Tk):
                                                       cantidad_100g=cantidad))
                     s.add(ing)
                 s.commit()
+                ing_id_final = ing.id
 
             messagebox.showinfo("✅ Éxito", "Ingrediente guardado correctamente.")
-            self.mostrar_menu_ingredientes()
+            self.mostrar_detalle_ingrediente(ing_id_final)
         except ValueError as exc:
             messagebox.showerror("Error de validación", str(exc))
         except IntegrityError:
@@ -966,108 +1295,12 @@ class AppNutricion(tk.Tk):
         except Exception as exc:
             messagebox.showerror("Error inesperado", str(exc))
 
-    def mostrar_vista_eliminar(self):
-        self.limpiar_pantalla()
-        self._titulo(self.container, "Eliminar Ingrediente")
-
-        fb = tk.Frame(self.container, bg=COLOR_BG)
-        fb.pack(fill="x", padx=20, pady=(0, 6))
-        tk.Label(fb, text="🔍  Buscar ingrediente a eliminar:",
-                 font=FONT_PEQUEÑA, bg=COLOR_BG).pack(anchor="w")
-        self.combo_busqueda = self._crear_combobox_buscable(fb, self.seleccionar_para_eliminar)
-        self.combo_busqueda.pack(fill="x", pady=4)
-
-        fbot = tk.Frame(self.container, bg=COLOR_BG)
-        fbot.pack(fill="x", padx=20, pady=(4, 0))
-        self._boton(fbot, "← Volver", self.mostrar_menu_ingredientes, ancho=14).pack(side="left")
-        self._boton(fbot, "🗑️  Eliminar", self.eliminar_ingrediente,
-                    color_bg=COLOR_PELIGRO, color_fg="white", ancho=16).pack(side="right")
-        self._separador(self.container)
-
-        self.lbl_advertencia = tk.Label(
-            self.container, text="Selecciona un ingrediente para eliminarlo.",
-            fg="#757575", font=FONT_NORMAL, bg=COLOR_BG, wraplength=480, justify="center")
-        self.lbl_advertencia.pack(pady=30)
-
-    def seleccionar_para_eliminar(self, event=None):
-        seleccion = self.combo_busqueda.get()
-        if not seleccion or seleccion not in self.mapa_ingredientes:
-            return
-        self.ingrediente_actual_id = self.mapa_ingredientes[seleccion]
-        self.lbl_advertencia.config(
-            text=f"⚠️  ¿Estás seguro de eliminar?\n\n«{seleccion}»\n\nEsta acción no se puede deshacer.",
-            fg=COLOR_PELIGRO, font=("Segoe UI", 10, "bold"))
-
-    def eliminar_ingrediente(self):
-        if not self.ingrediente_actual_id:
-            messagebox.showerror("Sin selección", "Selecciona un ingrediente primero.")
-            return
-        if not messagebox.askyesno("Confirmar eliminación",
-                                   "¿Estás absolutamente seguro?\n\nEsta acción es irreversible."):
-            return
-        try:
-            with Session(engine) as s:
-                ing = s.get(Ingrediente, self.ingrediente_actual_id)
-                if ing:
-                    s.delete(ing)
-                    s.commit()
-            messagebox.showinfo("✅ Eliminado", "Ingrediente eliminado correctamente.")
-            self.mostrar_menu_ingredientes()
-        except Exception as exc:
-            messagebox.showerror("Error inesperado", str(exc))
-
     # ══════════════════════════════════════════════════════════════════════════
     # PRODUCTOS (nodo único del BOM: receta de ingredientes y/o productos)
+    #
+    # Sin menú propio: se crean/editan/eliminan/visualizan desde el árbol
+    # explorador (mostrar_menu_principal) y sus vistas de detalle.
     # ══════════════════════════════════════════════════════════════════════════
-
-    def mostrar_menu_productos(self):
-        self.limpiar_pantalla()
-        self._titulo(self.container, "🧪 Gestionar Productos")
-
-        frame = tk.Frame(self.container, bg=COLOR_BG)
-        frame.pack(pady=10)
-
-        self._boton(frame, "🧪  Crear Producto",
-                    lambda: self.mostrar_formulario_producto('crear'),
-                    color_bg=COLOR_ACENTO, color_fg="white").pack(pady=5)
-
-        tk.Frame(frame, bg="#BDBDBD", height=1).pack(fill="x", pady=8)
-
-        self._boton(frame, "✏️  Editar Producto",
-                    lambda: self._seleccionar_prod_y_hacer(
-                        lambda pid: self.mostrar_formulario_producto('editar', pid))).pack(pady=5)
-        self._boton(frame, "📊  Ver Tabla Nutricional",
-                    lambda: self._seleccionar_prod_y_hacer(self._ver_tabla_prod)).pack(pady=5)
-        self._boton(frame, "🗑️  Eliminar Producto",
-                    self.mostrar_vista_eliminar_prod,
-                    color_bg=COLOR_PELIGRO, color_fg="white").pack(pady=5)
-
-        tk.Frame(frame, bg="#BDBDBD", height=1).pack(fill="x", pady=8)
-        self._boton(frame, "← Volver al Menú Principal",
-                    self.mostrar_menu_principal, ancho=30).pack(pady=5)
-
-    def _seleccionar_prod_y_hacer(self, callback):
-        self.limpiar_pantalla()
-        self._titulo(self.container, "Seleccionar Producto")
-
-        fb = tk.Frame(self.container, bg=COLOR_BG)
-        fb.pack(fill="x", padx=20, pady=10)
-        tk.Label(fb, text="🔍  Buscar Producto:", font=FONT_PEQUEÑA, bg=COLOR_BG).pack(anchor="w")
-        combo = self._crear_combobox_producto(fb, lambda e: None)
-        combo.pack(fill="x", pady=4)
-
-        def _hacer():
-            nombre = combo.get()
-            if not nombre or nombre not in self.mapa_productos:
-                messagebox.showerror("Error", "Selecciona un Producto válido.")
-                return
-            callback(self.mapa_productos[nombre])
-
-        fbot = tk.Frame(self.container, bg=COLOR_BG)
-        fbot.pack(fill="x", padx=20, pady=10)
-        self._boton(fbot, "← Volver", self.mostrar_menu_productos, ancho=14).pack(side="left")
-        self._boton(fbot, "✓ Seleccionar", _hacer,
-                    color_bg=COLOR_ACENTO, color_fg="white", ancho=16).pack(side="right")
 
     # ── Formulario crear/editar Producto (unificado) ──────────────────────────
 
@@ -1077,12 +1310,16 @@ class AppNutricion(tk.Tk):
         self._prod_receta_prod: list[dict] = []
         self._prod_costos: list[dict] = []
         self._critico_var = tk.BooleanVar(value=False)
+        self._vendible_var = tk.BooleanVar(value=True)
 
         titulo = "Nuevo Producto" if modo == 'crear' else "Editar Producto"
         self._titulo(self.container, titulo)
 
-        self._barra_botones(self.mostrar_menu_productos,
-                            lambda: self._guardar_producto(modo, prod_id),
+        # Al crear vuelve al explorador; al editar vuelve al detalle de este
+        # producto, no al listado — es el patrón de edición in-place.
+        volver = (self.mostrar_menu_principal if modo == 'crear'
+                 else lambda: self.mostrar_detalle_producto(prod_id))
+        self._barra_botones(volver, lambda: self._guardar_producto(modo, prod_id),
                             "💾  Guardar Producto")
         self._separador(self.container)
 
@@ -1131,6 +1368,15 @@ class AppNutricion(tk.Tk):
         self._lbl_critico_auto = tk.Label(row_crit, text="(aplica sellos de advertencia)",
                  font=FONT_PEQUEÑA, bg=COLOR_BG, fg="#757575")
         self._lbl_critico_auto.pack(side="left", padx=8)
+
+        # Checkbox de clasificación comercial — no afecta la receta: un
+        # Producto vendible puede seguir siendo componente de otro.
+        row_vend = tk.Frame(lf1, bg=COLOR_BG)
+        row_vend.pack(fill="x", padx=8, pady=3)
+        tk.Checkbutton(row_vend, text="  Producto apto para venta (Producto Terminado)",
+                       variable=self._vendible_var,
+                       font=FONT_BOLD, bg=COLOR_BG, fg=COLOR_TEXTO,
+                       selectcolor="#FFFFFF", activebackground=COLOR_BG).pack(side="left")
 
         # ── Sección 2: Receta de ingredientes ──
         lf2 = tk.LabelFrame(frame_form, text=" Receta de Ingredientes (% en peso) ",
@@ -1420,6 +1666,7 @@ class AppNutricion(tk.Tk):
             self._prod_entries["descripcion"].insert(0, p.descripcion or "")
             self._prod_entries["humedad_final"].insert(0, str(round(p.humedad_final * 100.0, 6)))
             self._critico_var.set(p.critico)
+            self._vendible_var.set(p.es_vendible)
             for campo in ("porcion_g", "gramaje_g"):
                 self._prod_entries[campo].delete(0, tk.END)
                 self._prod_entries[campo].insert(0, str(getattr(p, campo)))
@@ -1458,6 +1705,7 @@ class AppNutricion(tk.Tk):
             desc = self._prod_entries["descripcion"].get().strip()
             h_str = self._prod_entries["humedad_final"].get().strip().replace(",", ".")
             critico = self._critico_var.get()
+            vendible = self._vendible_var.get()
 
             if not nombre:
                 raise ValueError("El nombre del Producto no puede estar vacío.")
@@ -1487,6 +1735,7 @@ class AppNutricion(tk.Tk):
                 if modo == "crear":
                     p = Producto(nombre=nombre, descripcion=desc,
                                 humedad_final=humedad_f, critico=critico,
+                                es_vendible=vendible,
                                 porcion_g=porcion_g, gramaje_g=gramaje_g,
                                 semanas_caducidad_override=semanas_ov,
                                 trazas=trazas)
@@ -1498,6 +1747,7 @@ class AppNutricion(tk.Tk):
                     p.descripcion = desc
                     p.humedad_final = humedad_f
                     p.critico = critico
+                    p.es_vendible = vendible
                     p.porcion_g = porcion_g
                     p.gramaje_g = gramaje_g
                     p.semanas_caducidad_override = semanas_ov
@@ -1560,7 +1810,7 @@ class AppNutricion(tk.Tk):
                 critico=critico_p, critico_auto=critico_auto,
                 humedad_final_pct=humedad_pct, micronutrientes=micros,
                 descriptores=descs, caducidad_info=cad_info, ficha=ficha)
-            self.mostrar_menu_productos()
+            self.mostrar_detalle_producto(cad_info["prod_id"])
 
         except ValueError as exc:
             messagebox.showerror("Error de validación", str(exc))
@@ -1603,95 +1853,26 @@ class AppNutricion(tk.Tk):
                 critico=critico, critico_auto=critico_auto,
                 humedad_final_pct=humedad_pct, micronutrientes=micros,
                 descriptores=descs, caducidad_info=cad_info, ficha=ficha)
-            self.mostrar_menu_productos()
+            self.mostrar_detalle_producto(prod_id)
         except Exception as exc:
             messagebox.showerror("Error", str(exc))
-
-    def mostrar_vista_eliminar_prod(self):
-        self.limpiar_pantalla()
-        self._titulo(self.container, "Eliminar Producto")
-
-        fb = tk.Frame(self.container, bg=COLOR_BG)
-        fb.pack(fill="x", padx=20, pady=(0, 6))
-        tk.Label(fb, text="🔍  Buscar Producto a eliminar:",
-                 font=FONT_PEQUEÑA, bg=COLOR_BG).pack(anchor="w")
-        self._prod_combo_elim = self._crear_combobox_producto(fb, self._prod_seleccionar_elim)
-        self._prod_combo_elim.pack(fill="x", pady=4)
-
-        fbot = tk.Frame(self.container, bg=COLOR_BG)
-        fbot.pack(fill="x", padx=20, pady=(4, 0))
-        self._boton(fbot, "← Volver", self.mostrar_menu_productos, ancho=14).pack(side="left")
-        self._boton(fbot, "🗑️  Eliminar", self._prod_eliminar,
-                    color_bg=COLOR_PELIGRO, color_fg="white", ancho=16).pack(side="right")
-        self._separador(self.container)
-
-        self._prod_lbl_adv = tk.Label(
-            self.container, text="Selecciona un Producto para eliminarlo.",
-            fg="#757575", font=FONT_NORMAL, bg=COLOR_BG, wraplength=480, justify="center")
-        self._prod_lbl_adv.pack(pady=30)
-        self._prod_id_elim: int | None = None
-
-    def _prod_seleccionar_elim(self, event=None):
-        nombre = self._prod_combo_elim.get()
-        if not nombre or nombre not in self.mapa_productos:
-            return
-        self._prod_id_elim = self.mapa_productos[nombre]
-        self._prod_lbl_adv.config(
-            text=f"⚠️  ¿Eliminar Producto?\n\n«{nombre}»\n\nEsta acción no se puede deshacer.",
-            fg=COLOR_PELIGRO, font=("Segoe UI", 10, "bold"))
-
-    def _prod_eliminar(self):
-        if not self._prod_id_elim:
-            messagebox.showerror("Sin selección", "Selecciona un Producto primero.")
-            return
-        if not messagebox.askyesno("Confirmar",
-                                   "¿Eliminar este Producto?\n\nEsta acción es irreversible."):
-            return
-        try:
-            with Session(engine) as s:
-                p = s.get(Producto, self._prod_id_elim)
-                if p:
-                    s.delete(p)
-                    s.commit()
-            messagebox.showinfo("✅ Eliminado", "Producto eliminado correctamente.")
-            self.mostrar_menu_productos()
-        except Exception as exc:
-            messagebox.showerror("Error inesperado", str(exc))
 
     # ══════════════════════════════════════════════════════════════════════════
     # NORMATIVAS
     # ══════════════════════════════════════════════════════════════════════════
 
-    def mostrar_menu_normativas(self):
+    def mostrar_vista_normativas_vacia(self):
+        """
+        El árbol ya expone la carpeta "Normativas", pero el módulo de gestión
+        (CRUD de normativas propias) todavía no existe — calcular_sellos()
+        sigue viva y se usa igual dentro de la Tabla Nutricional. Esto es solo
+        el placeholder de la carpeta en el explorador.
+        """
         self.limpiar_pantalla()
-        self._titulo(self.container, "📋 Normativas de Etiquetado")
-
-        tk.Label(self.container,
-                 text="Normativas disponibles para el cálculo de sellos y destacadores.",
-                 font=FONT_PEQUEÑA, bg=COLOR_BG, fg="#757575").pack(pady=(0, 12))
-
-        frame_list = tk.Frame(self.container, bg=COLOR_BG)
-        frame_list.pack(fill="both", expand=True, padx=20)
-
-        tree = ttk.Treeview(frame_list,
-            columns=("nombre", "pais", "descripcion"), show="headings", height=8)
-        tree.heading("nombre", text="Normativa")
-        tree.heading("pais", text="País")
-        tree.heading("descripcion", text="Descripción")
-        tree.column("nombre", width=250)
-        tree.column("pais", width=80, anchor="center")
-        tree.column("descripcion", width=350)
-        tree.pack(fill="both", expand=True)
-
-        for nombre, info in NORMATIVAS_DISPONIBLES.items():
-            tree.insert("", "end", values=(nombre, info["pais"], info["descripcion"]))
-
-        tk.Label(self.container,
-                 text="💡  Las normativas se calculan automáticamente al ver la tabla\n"
-                      "nutricional de un Producto.\n\n"
-                      "Para agregar una nueva normativa, contacte al desarrollador.",
-                 font=FONT_PEQUEÑA, bg=COLOR_BG, fg="#757575",
-                 justify="center", wraplength=500).pack(pady=16)
-
-        self._boton(self.container, "← Volver al Menú Principal",
-                    self.mostrar_menu_principal, ancho=30).pack(pady=10)
+        frame = tk.Frame(self.container, bg=COLOR_BG)
+        frame.pack(expand=True, fill="both")
+        tk.Label(frame, text="📋", font=("Segoe UI", 40), bg=COLOR_BG).pack(pady=(60, 10))
+        tk.Label(frame, text="Módulo de Normativas en desarrollo / Próximamente",
+                 font=FONT_BOLD, bg=COLOR_BG, fg="#757575").pack()
+        self._boton(frame, "← Volver al Explorador", self.mostrar_menu_principal,
+                    ancho=28).pack(pady=24)

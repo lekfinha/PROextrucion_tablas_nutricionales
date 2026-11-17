@@ -40,6 +40,14 @@ class Base(DeclarativeBase):
 #   rompería cualquier INSERT nuevo.
 COLUMNAS_OBSOLETAS: list[tuple[str, str]] = [("productos", "tipo")]
 
+# Columnas que cambiaron de nombre sin cambiar de contenido: se renombran en
+# vez de agregar+perder, para no vaciar lo que el usuario ya clasificó.
+#   ingredientes.alergenos → declarables — ahora cubre también colorantes,
+#   edulcorantes y polialcoholes (Art. 136/146/151), no solo alérgenos.
+COLUMNAS_RENOMBRADAS: list[tuple[str, str, str]] = [
+    ("ingredientes", "alergenos", "declarables"),
+]
+
 
 def migrar_columnas_faltantes() -> list[str]:
     """
@@ -48,9 +56,12 @@ def migrar_columnas_faltantes() -> list[str]:
     existentes, así que sin esto una base ya poblada revienta con
     "no such column" al agregar un campo.
 
-    También elimina las columnas de COLUMNAS_OBSOLETAS. Una columna NOT NULL
-    sin server_default no se puede agregar en SQLite y se omite (requiere
-    migración manual). Retorna la lista de cambios, para log.
+    También elimina las columnas de COLUMNAS_OBSOLETAS y renombra las de
+    COLUMNAS_RENOMBRADAS (antes de agregar columnas nuevas, para que el
+    renombre no quede enmascarado por un ADD COLUMN vacío con el nombre
+    nuevo). Una columna NOT NULL sin server_default no se puede agregar en
+    SQLite y se omite (requiere migración manual). Retorna la lista de
+    cambios, para log.
     """
     agregadas: list[str] = []
     with engine.begin() as con:
@@ -61,6 +72,14 @@ def migrar_columnas_faltantes() -> list[str]:
                 con.exec_driver_sql(
                     f'ALTER TABLE "{nombre_tabla}" DROP COLUMN "{columna}"')
                 agregadas.append(f"−{nombre_tabla}.{columna}")
+
+        for nombre_tabla, viejo, nuevo in COLUMNAS_RENOMBRADAS:
+            presentes = {fila[1] for fila in
+                         con.exec_driver_sql(f'PRAGMA table_info("{nombre_tabla}")')}
+            if viejo in presentes and nuevo not in presentes:
+                con.exec_driver_sql(
+                    f'ALTER TABLE "{nombre_tabla}" RENAME COLUMN "{viejo}" TO "{nuevo}"')
+                agregadas.append(f"{nombre_tabla}.{viejo}→{nuevo}")
 
         for tabla in Base.metadata.sorted_tables:
             existentes = {fila[1] for fila in
